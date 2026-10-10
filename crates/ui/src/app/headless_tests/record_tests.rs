@@ -68,12 +68,13 @@ fn titles(rig: &Rig) -> Vec<String> {
 }
 
 fn group(rig: &mut Rig) {
-    rig.key(Key::G, Modifiers::SHIFT);
+    let ctx = rig.ctx.clone();
+    rig.app.apply(Action::ToggleGrouped, &ctx);
     assert!(rig.app.crates.shown().is_grouped());
 }
 
 #[test]
-fn shift_g_groups_the_crate_into_record_rows_and_back() {
+fn grouping_makes_record_rows_and_shift_g_does_nothing() {
     let (mut rig, _) = records_rig("group-toggle", &[1, 1, 1, 2, 2, 3]);
     group(&mut rig);
     let out = rig.frame(Vec::new());
@@ -90,13 +91,13 @@ fn shift_g_groups_the_crate_into_record_rows_and_back() {
         "no track rows while closed"
     );
     assert_eq!(rig.app.pl_list().len(), 3);
+    // Shift+G is no shortcut: the ▤ button and the ≡ menu group.
     rig.key(Key::G, Modifiers::SHIFT);
-    assert!(!rig.app.crates.shown().is_grouped());
-    assert_eq!(rig.app.pl_list().len(), 6);
-    // The ≡ menu does the same.
+    assert!(rig.app.crates.shown().is_grouped());
     rig.click(footer_button(&rig, "pl_menu"));
     rig.click_text("Group by record");
-    assert!(rig.app.crates.shown().is_grouped());
+    assert!(!rig.app.crates.shown().is_grouped());
+    assert_eq!(rig.app.pl_list().len(), 6);
 }
 
 #[test]
@@ -333,7 +334,7 @@ fn a_record_row_names_the_record_artist() {
 }
 
 #[test]
-fn the_sidebar_counts_records_in_a_grouped_crate() {
+fn the_sidebar_counts_records_grouped_or_flat() {
     let (mut rig, _) = records_rig("group-count", &[1, 1, 1, 2, 2, 3]);
     rig.app.settings.playlist_width = 700;
     let count_of = |out: &egui::FullOutput| {
@@ -348,7 +349,7 @@ fn the_sidebar_counts_records_in_a_grouped_crate() {
             .find_map(|t| t.text.parse::<usize>().ok())
     };
     let out = rig.frame(Vec::new());
-    assert_eq!(count_of(&out), Some(6), "flat: its tracks");
+    assert_eq!(count_of(&out), Some(3), "flat: its records");
     group(&mut rig);
     let out = rig.frame(Vec::new());
     assert_eq!(count_of(&out), Some(3), "grouped: its records");

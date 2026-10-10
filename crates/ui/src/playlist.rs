@@ -969,12 +969,21 @@ impl Playlist {
         changed
     }
 
-    pub fn set_failed(&mut self, id: EntryId) {
-        if let Some(e) = self.entry_mut(id)
-            && e.status.note().is_none()
-        {
+    /// Marks `id` as unplayable. A downloaded preview whose file is gone (deleted from the
+    /// cache, or left in an old cache folder) waits to download again instead: returns true.
+    pub fn set_failed(&mut self, id: EntryId) -> bool {
+        let Some(e) = self.entry_mut(id) else {
+            return false;
+        };
+        let clip = e.origin.as_ref().is_some_and(|o| o.clip.is_some());
+        if clip && !std::path::Path::new(&e.track.0).is_file() {
+            self.set_waiting(id, WaitKind::Queued);
+            return true;
+        }
+        if e.status.note().is_none() {
             e.status = EntryStatus::Failed;
         }
+        false
     }
 
     // ---- entries waiting for their audio (the producer API) ----------------------------
@@ -1549,6 +1558,18 @@ impl Playlist {
         let words = fold_words(text);
         if words == self.search {
             return false;
+        }
+        // A new search covers the whole crate: filters set before it would hide matches.
+        if self.search.is_empty() {
+            if self.bpm_range.is_some() {
+                self.set_bpm_filter(None);
+            }
+            // One facet at a time: `None` would turn the CART switch off too.
+            for f in Facet::ALL {
+                if !self.picked[f.index()].is_empty() {
+                    self.clear_picks(Some(f));
+                }
+            }
         }
         self.search = words;
         self.changed();
@@ -3082,6 +3103,30 @@ mod tests {
         p.set_search("");
         assert_eq!(p.shown_rows(), [0, 1, 2, 3]);
         assert!(!p.is_filtered());
+    }
+
+    #[test]
+    fn starting_a_search_clears_the_filters_set_before_it() {
+        let mut p = searchable(&[
+            ("Theo Parrish", "Sound Signature", "SS-001", "Summer"),
+            ("Nightcraft", "Lowtide Tapes", "LT-012", "Night"),
+        ]);
+        p.set_pick(Facet::Label, "Lowtide Tapes", true);
+        p.set_cart_only(true);
+        assert!(!p.set_search("   "), "blanks start no search");
+        assert!(p.filter(Facet::Label).is_some());
+        p.set_search("parrish");
+        assert!(p.filter(Facet::Label).is_none(), "the label pick is gone");
+        assert!(p.cart_only(), "the CART switch stays");
+        // A filter set during the search narrows it, and editing the search keeps it.
+        p.set_cart_only(false);
+        p.set_pick(Facet::Label, "Lowtide Tapes", true);
+        assert!(p.shown_rows().is_empty());
+        p.set_search("parrish summer");
+        assert!(p.filter(Facet::Label).is_some());
+        // Clearing the search brings nothing back.
+        p.set_search("");
+        assert_eq!(p.shown_rows(), [1]);
     }
 
     #[test]

@@ -29,15 +29,18 @@ pub enum Field {
     Time,
     /// The record's formats ("Vinyl", "File", "Vinyl, CD").
     Format,
+    /// The record's styles, as Discogs lists them ("Minimal, Deep House").
+    Style,
 }
 
 impl Field {
-    pub const ALL: [Field; 10] = [
+    pub const ALL: [Field; 11] = [
         Field::CatNo,
         Field::Artist,
         Field::Title,
         Field::Album,
         Field::Format,
+        Field::Style,
         Field::Bpm,
         Field::Side,
         Field::Year,
@@ -57,6 +60,7 @@ impl Field {
             Field::ForSale => "For sale",
             Field::Time => "Time",
             Field::Format => "Format",
+            Field::Style => "Style",
         }
     }
 }
@@ -78,15 +82,16 @@ impl Field {
     fn default_width(self) -> f32 {
         match self {
             Field::CatNo => 0.10,
-            Field::Artist => 0.17,
+            Field::Artist => 0.15,
             Field::Title => 0.0,
-            Field::Album => 0.14,
+            Field::Album => 0.12,
             Field::Bpm => 0.07,
             Field::Side => 0.05,
             Field::Year => 0.06,
             Field::ForSale => 0.10,
             Field::Time => 0.08,
             Field::Format => 0.06,
+            Field::Style => 0.08,
         }
     }
 }
@@ -193,6 +198,7 @@ pub fn cell_text(e: &Entry, f: Field) -> String {
         },
         Field::Time => String::new(),
         Field::Format => o.map(|o| o.formats.clone()).unwrap_or_default(),
+        Field::Style => o.map(|o| o.styles.clone()).unwrap_or_default(),
     }
 }
 
@@ -288,6 +294,7 @@ fn key(e: &Entry, field: Field) -> Key {
                 .position(|f| *f == first)
                 .map_or(UNKNOWN, |i| Key::Num(i as f64))
         }
+        Field::Style => text(o.map_or("", |o| o.styles.split(',').next().unwrap_or(""))),
         // Priced first (by the lowest price), then copies with no price, then "none for
         // sale", then no snapshot at all.
         Field::ForSale => match o.and_then(|o| o.for_sale.as_ref()) {
@@ -328,7 +335,7 @@ mod tests {
         let cols = c.layout(600.0, 24.0);
         let names: Vec<Col> = cols.iter().map(|c| c.0).collect();
         assert_eq!(names[0], Col::Number);
-        assert_eq!(names.len(), 11);
+        assert_eq!(names.len(), 12);
         let (_, x, w) = cols.last().copied().unwrap();
         assert!((x + w - 600.0).abs() < 0.01, "they fill the list exactly");
         let title_w = |c: &ColumnSettings| {
@@ -342,7 +349,7 @@ mod tests {
         c.toggle(Field::Year);
         assert_eq!(
             c.layout(600.0, 24.0).len(),
-            10,
+            11,
             "a hidden column is left out"
         );
         assert!(
@@ -421,7 +428,33 @@ mod tests {
         let at = |f| order.iter().position(|c| *c == Col::Field(f)).unwrap();
         assert_eq!(at(Field::Album), at(Field::Title) + 1, "after the title");
         assert_eq!(at(Field::Format), at(Field::Album) + 1, "then the format");
-        assert_eq!(at(Field::Bpm), at(Field::Format) + 1, "before the BPM");
+        assert_eq!(at(Field::Style), at(Field::Format) + 1, "then the styles");
+        assert_eq!(at(Field::Bpm), at(Field::Style) + 1, "before the BPM");
+    }
+
+    #[test]
+    fn style_shows_the_styles_and_sorts_by_the_first() {
+        use crate::playlist::{Origin, Playlist};
+        let mut p = Playlist::default();
+        for styles in ["techno", "", "Ambient, Drone", "Minimal, Deep House"] {
+            let origin = Origin {
+                styles: styles.into(),
+                ..Default::default()
+            };
+            p.add_waiting("x", "t", None, Some(origin), "listed");
+        }
+        let mut v: Vec<&Entry> = p.entries().iter().collect();
+        v.sort_by(|a, b| compare(a, b, Field::Style, Dir::Asc));
+        let cells: Vec<String> = v.iter().map(|e| cell_text(e, Field::Style)).collect();
+        assert_eq!(
+            cells,
+            ["Ambient, Drone", "Minimal, Deep House", "techno", ""]
+        );
+        // Saved settings from before the column existed show it, and keep what was hidden.
+        let old: ColumnSettings = ron::from_str("(hidden: [Year], widths: {})").unwrap();
+        assert!(old.shows(Field::Style));
+        assert!(!old.shows(Field::Year));
+        assert_eq!(old.width(Field::Style), 0.08);
     }
 
     #[test]

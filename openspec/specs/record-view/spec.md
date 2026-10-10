@@ -9,11 +9,11 @@ A crate SHALL be shown either flat (one row per entry, as before) or grouped by 
 - an album with one entry SHALL be a record row that acts as that entry, with nothing to open;
 - an entry that belongs to no album SHALL be an ordinary row.
 
-The choice SHALL be made with the ▤ button in the playlist title bar (lit while grouped), with Shift+G, or with "Group by record" in the ≡ menu. It SHALL be remembered per crate across launches. A crate that has never been toggled SHALL be grouped when it is the user's Discogs wantlist or collection crate, and flat otherwise. Toggling SHALL NOT interrupt playback.
+The choice SHALL be made with the ▤ button in the playlist title bar (lit while grouped) or with "Group by record" in the ≡ menu. It SHALL be remembered per crate across launches. A crate that has never been toggled SHALL be grouped when it is the user's Discogs wantlist or collection crate, and flat otherwise. Toggling SHALL NOT interrupt playback.
 
 #### Scenario: Toggle
-- **WHEN** a flat crate of 12 entries from 4 releases is shown and the user presses Shift+G
-- **THEN** the crate shows 4 record rows and ▤ is lit; pressing Shift+G again shows the 12 entries flat
+- **WHEN** a flat crate of 12 entries from 4 releases is shown and the user clicks ▤
+- **THEN** the crate shows 4 record rows and ▤ is lit; clicking ▤ again shows the 12 entries flat
 
 #### Scenario: Discogs crates default to grouped
 - **WHEN** "Collection: digger" is shown for the first time after this change
@@ -23,6 +23,10 @@ The choice SHALL be made with the ▤ button in the playlist title bar (lit whil
 - **WHEN** the user groups crate "Friday" and restarts the app
 - **THEN** "Friday" is still grouped
 
+#### Scenario: No Shift+G
+- **WHEN** a flat crate is shown and the user presses Shift+G
+- **THEN** the crate stays flat
+
 ### Requirement: Record row
 A record row SHALL show, from left to right:
 - the record's cover, as a square of the row's height, or an empty frame while it loads, or a record icon when there is none (a local album, no image, or a failed fetch);
@@ -30,7 +34,7 @@ A record row SHALL show, from left to right:
 - on its first line, artist – album and the OWNED, CART, SOLD, format and ★ marks, and the record's Discogs styles right-aligned and dimmed (its genres when it has no style). In a seller crate, a record with exactly one unsold copy SHALL show that copy's cart pill (+ CART or IN CART, see `discogs-cart`) in place of CART. The artist SHALL be the record's credited artist when known (see `album-entries`), else its first entry's artist. The format mark (FILE, CD, CASS or OTHER) SHALL be shown only for a record with formats but no vinyl (see `discogs-intake`);
 - on its second line, dimmed, the catalog number, year, number of tracks and for-sale snapshot, where known. In a seller crate, the for-sale snapshot SHALL be replaced by that seller's unsold copies and their price range ("3 copies €9.00–€18.00", or "1 copy €9.00").
 
-When it holds the playing entry, its second line SHALL name that track with the play or pause sign, and the row SHALL be drawn in the highlight colour. In the column layout, a record row SHALL span the full width, track rows SHALL use the columns, and no column header SHALL be shown while the crate is grouped (its row goes to the list; ☰ › Sort still sorts). The crate sidebar SHALL show a grouped crate's number of records (albums, and entries of no album) instead of its tracks, and its tooltip both. Hovering a record row SHALL show the tooltip of its first entry. For a Discogs record with tracks waiting to be searched or found by search, that tooltip's first detail line, labelled Record, SHALL count the record's entries, its entries with a Discogs clip, and its entries still to search ("11 tracks · 1 clip · 10 to search"); a count of zero SHALL be left out.
+When it holds the playing entry, its second line SHALL name that track with the play or pause sign, and the row SHALL be drawn in the highlight colour. In the column layout, a record row SHALL span the full width, track rows SHALL use the columns, and no column header SHALL be shown while the crate is grouped (its row goes to the list; ☰ › Sort still sorts). The crate sidebar SHALL show a crate's number of records (albums, and entries of no album), whether the crate is grouped or flat, and its tooltip both its records and its tracks. Hovering a record row SHALL show the tooltip of its first entry. For a Discogs record with tracks waiting to be searched or found by search, that tooltip's first detail line, labelled Record, SHALL count the record's entries, its entries with a Discogs clip, and its entries still to search ("11 tracks · 1 clip · 10 to search"); a count of zero SHALL be left out.
 
 #### Scenario: A record
 - **WHEN** a grouped crate holds 3 entries of "Glasshouse EP" by Nightcraft, LT-012, 1994, with 6 for sale from €9.00, and its cover is cached
