@@ -279,6 +279,13 @@ pub(super) struct Dig {
     identify_asked: bool,
     /// Refresh collection / Refresh wantlist asked: the crate follows when the answer comes.
     refreshing_collection: bool,
+    /// The running collection read's pages: read, and in all (0 until known).
+    pub(super) sync_progress: Option<(u32, u32)>,
+    /// The collection crate while Refresh collection fills in the records it lacked, and
+    /// whether its sends have started (they end the fill when they're done).
+    pub(super) refilling: Option<(CrateId, bool)>,
+    /// Crates whose fill was stopped: what still arrives listed leaves when its sends end.
+    stopped_fill: HashSet<CrateId>,
     refreshing_wantlist: bool,
     /// Label crates being refreshed, with the records they held before, for the summary.
     label_refresh: HashMap<CrateId, HashSet<u64>>,
@@ -406,6 +413,9 @@ impl Dig {
             connected: None,
             identify_asked: false,
             refreshing_collection: false,
+            sync_progress: None,
+            refilling: None,
+            stopped_fill: HashSet::new(),
             refreshing_wantlist: false,
             label_refresh: HashMap::new(),
             downloading: None,
@@ -1255,6 +1265,88 @@ impl DiggrApp {
         Some((c, done.ready + done.skipped, total))
     }
 
+    /// Refresh collection's window: reading the collection page by page, then adding the
+    /// records the crate lacked, with Stop at any moment. It closes when the refresh ends.
+    fn dig_refresh_ui(&mut self, ctx: &egui::Context) {
+        let Some(d) = &mut self.dig else { return };
+        if let Some((c, started)) = &mut d.refilling {
+            let running = d.jobs.values().any(|j| j.target == *c);
+            *started |= running;
+            if *started && !running {
+                d.refilling = None;
+            }
+        }
+        let fill = d.refilling.map(|(c, _)| {
+            d.jobs
+                .values()
+                .filter(|j| j.target == c)
+                .fold((0, 0), |(done, total), j| (done + j.done, total + j.total))
+        });
+        let (text, part) = if d.refreshing_collection {
+            match d.sync_progress {
+                Some((read, pages)) if pages > 0 => (
+                    format!("Reading your collection… page {read} of {pages}"),
+                    read as f32 / pages as f32,
+                ),
+                _ if d.collection_syncing => ("Reading your collection…".to_owned(), 0.0),
+                _ => return,
+            }
+        } else if let (Some(_), Some((done, total))) = (d.refilling, fill) {
+            (
+                format!("Adding records… {done} of {total}"),
+                done as f32 / total.max(1) as f32,
+            )
+        } else {
+            return;
+        };
+        let mut stop = false;
+        egui::Window::new("Refresh collection")
+            .id(egui::Id::new("collection-refresh"))
+            .collapsible(false)
+            .resizable(false)
+            .default_width(320.0)
+            .show(ctx, |ui| {
+                ui.add(egui::ProgressBar::new(part).text(text));
+                stop = ui.button("Stop").clicked();
+            });
+        if stop {
+            self.dig_stop_refresh();
+        }
+    }
+
+    /// Stop in the refresh window: the read ends and the previous collection stays, or the
+    /// fill ends, keeping the records that arrived and dropping those still only listed.
+    pub(super) fn dig_stop_refresh(&mut self) {
+        let Some(d) = &mut self.dig else { return };
+        if std::mem::take(&mut d.refreshing_collection) {
+            d.send(Command::CancelCollectionSync);
+            d.collection_syncing = false;
+            d.sync_progress = None;
+        }
+        if let Some((c, _)) = d.refilling.take() {
+            d.send(Command::StopJobs(c));
+            d.stopped_fill.insert(c);
+            self.drop_listed(c);
+        }
+        self.notify("Refresh collection stopped");
+    }
+
+    /// Takes out crate `c`'s entries still listed without their record's details.
+    fn drop_listed(&mut self, c: CrateId) {
+        let Some(p) = self.crates.get_mut(c) else {
+            return;
+        };
+        let listed: Vec<EntryId> = p
+            .entries()
+            .iter()
+            .filter(|e| e.status == EntryStatus::Waiting(WaitKind::Listed))
+            .map(|e| e.id)
+            .collect();
+        if p.remove_ids(&listed) > 0 {
+            self.mark_crate(c);
+        }
+    }
+
     /// Download all tracks' window: the label, how far it got, what downloads now, and Stop at
     /// any moment. When the cache is full it asks to raise it. Closing it only hides it: the
     /// label's menu shows it again.
@@ -1920,6 +2012,12 @@ impl DiggrApp {
             Event::Finished(j) => {
                 let Some(d) = &mut self.dig else { return };
                 d.jobs.remove(&j.id);
+                if !d.jobs.values().any(|v| v.target == j.target)
+                    && d.stopped_fill.remove(&j.target)
+                {
+                    self.drop_listed(j.target);
+                }
+                let Some(d) = &mut self.dig else { return };
                 if let Some(before) = d.label_refresh.remove(&j.target) {
                     let new = self.crate_releases(j.target).difference(&before).count();
                     let name = self.crates.name(j.target);
@@ -1985,7 +2083,15 @@ impl DiggrApp {
                 Err(e) => self.notify(e.message()),
             },
             Event::TokenChecked(token, result) => self.dig_token_checked(token, result),
+            Event::CollectionProgress { read, pages } => {
+                if let Some(d) = &mut self.dig {
+                    d.sync_progress = Some((read, pages));
+                }
+            }
             Event::Collection(result) => {
+                if let Some(d) = &mut self.dig {
+                    d.sync_progress = None;
+                }
                 let failed = result.as_ref().err().map(ApiError::message);
                 let err = self.dig.as_mut().and_then(|d| d.collection_synced(result));
                 self.dig_notify(err);
@@ -2224,10 +2330,12 @@ impl DiggrApp {
             }
             p.remove_ids(&gone);
         }
+        // The user's own crates hold every record, even one whose clips another record brought.
+        let own_record = |o: &Origin| twins || record_key(o) == record_key(&base);
         let mut have: HashSet<String> = p
             .entries()
             .iter()
-            .filter_map(|e| e.origin.as_ref()?.clip.clone())
+            .filter_map(|e| e.origin.as_ref().filter(|o| own_record(o))?.clip.clone())
             .collect();
         // Tracks to search the crate holds already (sent before): by record, side and title.
         let mut places: HashSet<(Option<RecordKey>, String, String)> = p
@@ -3104,6 +3212,11 @@ impl DiggrApp {
                     self.dig_fill(Page::new(url::PageKind::Release(r)), coll);
                 }
             }
+        }
+        if !new.is_empty()
+            && let Some(d) = &mut self.dig
+        {
+            d.refilling = Some((coll, false));
         }
         self.notify(changes_line("Collection", new.len(), gone.len()));
     }
@@ -4193,6 +4306,7 @@ impl DiggrApp {
         self.dig_connect_ui(ctx);
         self.bandcamp_dialog_ui(ctx);
         self.dig_download_ui(ctx);
+        self.dig_refresh_ui(ctx);
         self.dig_confirm_discard_ui(ctx);
         self.seller_dialogs_ui(ctx);
         let Some(d) = &mut self.dig else { return };

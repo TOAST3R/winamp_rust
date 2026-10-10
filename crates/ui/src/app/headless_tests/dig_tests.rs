@@ -7,7 +7,7 @@ use ::dig::browser::{FakeBrowser, sell_url};
 use ::dig::clock::RealClock;
 use ::dig::cover::{FakeImages, test_jpeg};
 use ::dig::discogs::model::RecordKey;
-use ::dig::discogs::transport::{FakeTransport, Method};
+use ::dig::discogs::transport::{FakeTransport, Fault, Method};
 use ::dig::discogs::url;
 use ::dig::jobs::{Filters, Job, Jobs};
 use ::dig::memory::DigMemory;
@@ -192,6 +192,42 @@ fn a_pasted_release_fills_the_shown_crate_with_playable_previews() {
     )]);
     assert_eq!(message(&rig), url::SUPPORTED);
     assert_eq!(rig.app.crates.get(PLAYLIST).unwrap().len(), 3);
+}
+
+#[test]
+fn a_preview_whose_file_is_gone_downloads_again_instead_of_failing() {
+    let fakes = Fakes::new();
+    let mut rig = rig("dig-gone", &fakes, |_| {});
+    rig.frame(vec![Event::Paste(RELEASE.into())]);
+    rig.until(|r| all_playable(r, PLAYLIST, 3), "three previews ready");
+    // Left in an old cache folder, and gone from the cache too.
+    let file = rig.dir.join(format!("cache/previews/{}.m4a", CLIPS[0]));
+    std::fs::remove_file(&file).unwrap();
+    let p = rig.app.crates.get_mut(PLAYLIST).unwrap();
+    let e = p.entries_mut().next().unwrap();
+    e.track = TrackRef::new(format!("/old/cache/previews/{}.m4a", CLIPS[0]));
+    let id = e.id;
+    // Played (the click that turned it red): it waits for its preview instead.
+    let ctx = rig.ctx.clone();
+    rig.app.apply(Action::PlayEntry(id), &ctx);
+    rig.until(
+        |r| {
+            let e = &r.app.crates.get(PLAYLIST).unwrap().entries()[0];
+            e.status == EntryStatus::Failed || !e.status.is_playable() || file.exists()
+        },
+        "the missing file is noticed",
+    );
+    assert_ne!(
+        rig.app.crates.get(PLAYLIST).unwrap().entries()[0].status,
+        EntryStatus::Failed,
+        "not red"
+    );
+    rig.until(|r| all_playable(r, PLAYLIST, 3), "downloaded again");
+    assert!(file.exists());
+    rig.until(
+        |r| r.app.crates.playing().current() == Some(id),
+        "the track you played plays once it's back",
+    );
 }
 
 #[test]
@@ -1247,7 +1283,8 @@ fn grouped_record_rows_in_view_load_their_covers_top_first() {
     let urls = cover_crate(&mut rig);
     // Grouped, each entry is a record row with its cover; the pointer is nowhere near.
     rig.frame(vec![Event::PointerMoved(pos2(5.0, 5.0))]);
-    rig.key(Key::G, Modifiers::SHIFT);
+    let ctx = rig.ctx.clone();
+    rig.app.apply(Action::ToggleGrouped, &ctx);
     let rows = rig.app.pl_visible_rows() / crate::records::RECORD_UNITS;
     let in_view = rows.min(6);
     rig.until(
@@ -2660,6 +2697,193 @@ fn refresh_collection_brings_the_crate_in_line_with_discogs() {
     assert!(holds(&rig, coll, 1003));
 }
 
+/// Release 1007: another pressing of the Glasshouse EP, listing the same three clips.
+fn route_twin_pressing(fakes: &Fakes) {
+    let dir = format!(
+        "{}/../dig/tests/fixtures/discogs",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    for cur in ["EUR", "USD"] {
+        let body = std::fs::read_to_string(format!("{dir}/releases_1001_curr_abbr_{cur}.json"))
+            .unwrap()
+            .replace("1001", "1007");
+        fakes
+            .transport
+            .route(format!("/releases/1007?curr_abbr={cur}"), 200, body);
+    }
+}
+
+#[test]
+fn the_collection_crate_keeps_a_record_whose_clips_another_record_brought() {
+    let fakes = Fakes::new();
+    route_twin_pressing(&fakes);
+    let mut rig = rig("dig-shared-clips", &fakes, with_token);
+    let coll = rig.app.crates.create("Collection: digger").unwrap();
+    rig.app.crates.set_collection(coll);
+    let other = rig.app.crates.create("Friday").unwrap();
+    let twin = "https://www.discogs.com/release/1007-Glasshouse-EP";
+    let send = |rig: &mut Rig, page: &str, name: &str| {
+        rig.app.dig_send(
+            url::parse(page).unwrap(),
+            SendMode::Crate(name.into()),
+            None,
+        );
+    };
+    // Elsewhere first: the twin pressing is read, and its clips are already there.
+    send(&mut rig, RELEASE, "Friday");
+    rig.until(|r| clips_of(r, other, 1001).len() == 3, "the EP");
+    send(&mut rig, twin, "Friday");
+    rig.until(
+        |r| {
+            fakes
+                .transport
+                .paths()
+                .iter()
+                .any(|p| p.contains("/releases/1007"))
+                && r.app.dig.as_ref().unwrap().jobs.is_empty()
+                && r.app.crates.get(other).is_some_and(|p| {
+                    p.entries().iter().all(|e| {
+                        e.status != EntryStatus::Waiting(crate::playlist::WaitKind::Listed)
+                    })
+                })
+        },
+        "the twin is read",
+    );
+    send(&mut rig, RELEASE, "Collection: digger");
+    rig.until(|r| clips_of(r, coll, 1001).len() == 3, "the EP");
+    send(&mut rig, twin, "Collection: digger");
+    rig.until(
+        |r| clips_of(r, coll, 1007).len() == 3,
+        "the twin, with its clips",
+    );
+    assert_eq!(
+        clips_of(&rig, coll, 1001).len(),
+        3,
+        "both pressings, each with its clips"
+    );
+    assert!(
+        clips_of(&rig, other, 1007).is_empty(),
+        "elsewhere a clip comes in once"
+    );
+}
+
+/// The collection in three pages of one record each: releases 1001, 1002 and 1003.
+fn route_three_pages(fakes: &Fakes) {
+    for n in 1..=3u64 {
+        fakes.transport.route(
+            format!(
+                "/users/digger/collection/folders/0/releases?sort=added&sort_order=desc&page={n}&per_page=100"
+            ),
+            200,
+            format!(
+                r#"{{"pagination": {{"page": {n}, "pages": 3, "items": 3}},
+                    "releases": [{{"id": {r}, "instance_id": {n},
+                                  "basic_information": {{"id": {r}, "master_id": 0}}}}]}}"#,
+                r = 1000 + n
+            ),
+        );
+    }
+}
+
+#[test]
+fn refresh_collection_shows_its_pages_and_stop_ends_the_read() {
+    let fakes = Fakes::new();
+    route_three_pages(&fakes);
+    let mut rig = rig("dig-refresh-stop", &fakes, with_token);
+    let coll = rig.app.crates.create("Collection: digger").unwrap();
+    rig.app.crates.set_collection(coll);
+    // Every answer takes a while, so the read can be caught between pages.
+    for _ in 0..20 {
+        fakes
+            .transport
+            .fault(Fault::Delay(Duration::from_millis(250)));
+    }
+    rig.app.dig_act(coll, DigAction::RefreshCollection);
+    rig.until(
+        |r| {
+            let out = r.frame(Vec::new());
+            shows(&out, "Reading your collection… page 1 of 3")
+        },
+        "the first page is shown",
+    );
+    rig.app.dig_stop_refresh();
+    assert_eq!(message(&rig), "Refresh collection stopped");
+    // Long enough for the rest of the read, had it gone on.
+    std::thread::sleep(Duration::from_millis(1200));
+    rig.frame(Vec::new());
+    let pages = || {
+        fakes
+            .transport
+            .paths()
+            .iter()
+            .filter(|p| p.contains("/collection/folders/0/"))
+            .count()
+    };
+    assert!(pages() < 3, "no more pages after Stop");
+    assert!(
+        rig.app.dig.as_ref().unwrap().collection.is_none(),
+        "nothing half-read is kept"
+    );
+    assert!(!shows(&rig.frame(Vec::new()), "Stop"), "the window is gone");
+}
+
+#[test]
+fn stop_while_adding_keeps_what_arrived_and_drops_what_is_only_listed() {
+    let fakes = Fakes::new();
+    let mut rig = rig("dig-refill-stop", &fakes, with_token);
+    let coll = rig.app.crates.create("Collection: digger").unwrap();
+    rig.app.crates.set_collection(coll);
+    rig.app.dig_send(
+        url::parse(RELEASE).unwrap(),
+        SendMode::Crate("Collection: digger".into()),
+        None,
+    );
+    rig.until(
+        |r| clips_of(r, coll, 1001).len() == 3,
+        "the first record arrives",
+    );
+    // The fill of a second record is under way: listed, its details slow to come.
+    for _ in 0..20 {
+        fakes
+            .transport
+            .fault(Fault::Delay(Duration::from_millis(300)));
+    }
+    rig.app.dig.as_mut().unwrap().refilling = Some((coll, false));
+    rig.app.dig_send(
+        url::parse("https://www.discogs.com/release/1002").unwrap(),
+        SendMode::Crate("Collection: digger".into()),
+        None,
+    );
+    rig.until(
+        |r| {
+            r.app
+                .dig
+                .as_ref()
+                .unwrap()
+                .jobs
+                .values()
+                .any(|j| j.target == coll)
+        },
+        "the fill runs",
+    );
+    assert!(shows(&rig.frame(Vec::new()), "Stop"), "the window shows");
+    rig.app.dig_stop_refresh();
+    rig.until(
+        |r| r.app.dig.as_ref().unwrap().jobs.is_empty(),
+        "its sends end",
+    );
+    assert_eq!(clips_of(&rig, coll, 1001).len(), 3, "what arrived stays");
+    let listed = rig
+        .app
+        .crates
+        .get(coll)
+        .unwrap()
+        .entries()
+        .iter()
+        .any(|e| e.status == EntryStatus::Waiting(crate::playlist::WaitKind::Listed));
+    assert!(!listed, "nothing waits for details any more");
+}
+
 #[test]
 fn refresh_wantlist_reads_it_again_and_follows_it() {
     let fakes = Fakes::new();
@@ -2921,7 +3145,8 @@ fn the_wantlist_crate_keeps_both_releases() {
         af_info(VINYL, Format::Vinyl),
         af_clips(&["CIRRUSclip1", "PENROSEclp1"]),
     ));
-    assert_eq!(releases_in(&rig, c), [Some(FLAC), Some(VINYL)]);
+    // Each record keeps its own clips, the one they share included.
+    assert_eq!(releases_in(&rig, c), [Some(FLAC), Some(VINYL), Some(VINYL)]);
 }
 
 #[test]

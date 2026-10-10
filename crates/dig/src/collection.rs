@@ -211,12 +211,55 @@ pub fn sync(
     cached: Option<&Collection>,
     now: u64,
 ) -> Result<Collection, ApiError> {
-    if let Some(old) = cached.filter(|c| c.username == user && !c.instances.is_empty()) {
-        let mut c = old.clone();
-        let mut added = 0;
-        let mut n = 1;
-        let total = loop {
-            let (items, pages, total) = page(client, user, n)?;
+    let mut s = Syncer::new(user, cached, now);
+    loop {
+        if let Some(c) = s.step(client)? {
+            return Ok(c);
+        }
+    }
+}
+
+/// A sync one page at a time, so it can show how far it got and be stopped between pages.
+#[derive(Debug, Clone)]
+pub struct Syncer {
+    user: String,
+    now: u64,
+    /// Bringing a copy of the cache up to date: what it had, and what was added.
+    newer: Option<(Collection, usize)>,
+    /// What a full read has gathered.
+    full: Collection,
+    next: u32,
+    pages: u32,
+}
+
+impl Syncer {
+    pub fn new(user: &str, cached: Option<&Collection>, now: u64) -> Self {
+        let newer = cached
+            .filter(|c| c.username == user && !c.instances.is_empty())
+            .map(|c| (c.clone(), 0));
+        Self {
+            user: user.to_owned(),
+            now,
+            newer,
+            full: Collection::default(),
+            next: 1,
+            pages: 0,
+        }
+    }
+
+    /// Pages read, and in all (0 until the first page says).
+    pub fn progress(&self) -> (u32, u32) {
+        (self.next - 1, self.pages)
+    }
+
+    /// Reads one page: the collection once complete, `None` while pages are left.
+    pub fn step(&mut self, client: &mut Client) -> Result<Option<Collection>, ApiError> {
+        let n = self.next;
+        let (items, pages, total) = page(client, &self.user, n)?;
+        self.pages = pages.max(n);
+        self.next += 1;
+        let last = n >= pages || items.is_empty();
+        if let Some((c, added)) = &mut self.newer {
             let mut known = false;
             for it in &items {
                 if c.instances.contains(&it.instance) {
@@ -224,44 +267,35 @@ pub fn sync(
                     break;
                 }
                 c.add(it);
-                added += 1;
+                *added += 1;
             }
-            if known || n >= pages || items.is_empty() {
-                break total;
+            if !(known || last) {
+                return Ok(None);
             }
-            n += 1;
-        };
-        if old.count + added == total {
-            c.count = total;
-            c.fetched_at = now;
-            c.index();
-            return Ok(c);
+            let (mut c, added) = self.newer.take().expect("updating");
+            if c.count + added == total {
+                c.count = total;
+                c.fetched_at = self.now;
+                c.index();
+                return Ok(Some(c));
+            }
+            // Something was removed: only a full read knows what.
+            (self.next, self.pages) = (1, 0);
+            return Ok(None);
         }
-        // Something was removed: only a full read knows what.
-    }
-    full(client, user, now)
-}
-
-fn full(client: &mut Client, user: &str, now: u64) -> Result<Collection, ApiError> {
-    let mut c = Collection {
-        username: user.to_owned(),
-        fetched_at: now,
-        ..Default::default()
-    };
-    let mut n = 1;
-    loop {
-        let (items, pages, total) = page(client, user, n)?;
         for it in &items {
-            c.add(it);
+            self.full.add(it);
         }
-        c.count = total;
-        if n >= pages || items.is_empty() {
-            break;
+        self.full.count = total;
+        if !last {
+            return Ok(None);
         }
-        n += 1;
+        let mut c = std::mem::take(&mut self.full);
+        c.username = self.user.clone();
+        c.fetched_at = self.now;
+        c.index();
+        Ok(Some(c))
     }
-    c.index();
-    Ok(c)
 }
 
 #[cfg(test)]
@@ -335,6 +369,17 @@ mod tests {
         let c = sync(&mut client(&t), "digger", None, 7).unwrap();
         assert_eq!((c.len(), c.count, c.fetched_at), (234, 234, 7));
         assert_eq!(collection_calls(&t), 3);
+
+        // One page a step, saying how far it got; dropping it between pages stops it.
+        let mut s = Syncer::new("digger", None, 7);
+        let mut cl = client(&t);
+        assert_eq!(s.progress(), (0, 0));
+        assert!(s.step(&mut cl).unwrap().is_none());
+        assert_eq!(s.progress(), (1, 3));
+        assert!(s.step(&mut cl).unwrap().is_none());
+        assert_eq!(s.progress(), (2, 3));
+        assert_eq!(s.step(&mut cl).unwrap().map(|c| c.len()), Some(234));
+        assert_eq!(collection_calls(&t), 6);
     }
 
     #[test]

@@ -79,6 +79,12 @@ pub enum Command {
     /// Bring the user's collection up to date from this cached one (or from nothing). Runs
     /// only when no send is waiting.
     SyncCollection(Option<Box<Collection>>),
+    /// Stop the collection sync waiting or running (Stop in the refresh window); nothing is
+    /// sent about it, and the previous collection stays.
+    CancelCollectionSync,
+    /// End every send into crate `target` now (each answered with `Finished`); what arrived
+    /// stays.
+    StopJobs(u64),
     /// Learn which release a marketplace item sells (for the browser's owned check). Runs
     /// only when no send is waiting; cached for good.
     ResolveShopItem(u64),
@@ -228,6 +234,11 @@ pub enum Event {
     /// A collection sync finished: the up-to-date collection, or why not (the previous one
     /// stays in use).
     Collection(Result<Box<Collection>, ApiError>),
+    /// A collection sync read `read` of `pages` pages (`pages` 0 until the first answer).
+    CollectionProgress {
+        read: u32,
+        pages: u32,
+    },
     /// A marketplace item's release (`None`: Discogs doesn't know the item).
     ShopItem(u64, Option<u64>),
     /// Cached details for a crate's records (see [`Command::Backfill`]); uncached ones are
@@ -333,6 +344,8 @@ pub struct Intake {
     now: fn() -> u64,
     /// Waiting for a moment with no send: a collection sync, and items to resolve.
     collection_sync: Option<Option<Box<Collection>>>,
+    /// The sync running, one page per step.
+    syncer: Option<collection::Syncer>,
     shop_items: Vec<u64>,
     first_sellers: bool,
     /// The cart is to be read at a moment with no send (`false`), or ahead of sends (`true`).
@@ -358,6 +371,7 @@ impl Intake {
             events: Vec::new(),
             now: crate::now_secs,
             collection_sync: None,
+            syncer: None,
             shop_items: Vec::new(),
             first_sellers: false,
             cart_read: None,
@@ -495,6 +509,21 @@ impl Intake {
                 self.events.push(Event::Wants(result));
             }
             Command::SyncCollection(cached) => self.collection_sync = Some(cached),
+            Command::CancelCollectionSync => {
+                self.collection_sync = None;
+                self.syncer = None;
+            }
+            Command::StopJobs(target) => {
+                let (stopped, kept) = std::mem::take(&mut self.jobs.jobs)
+                    .into_iter()
+                    .partition(|j| j.target == target);
+                self.jobs.jobs = kept;
+                for j in stopped {
+                    self.active.remove(&j.id);
+                    self.events.push(Event::Finished(Self::job_ref(&j)));
+                }
+                self.save();
+            }
             Command::ResolveShopItem(id) => {
                 if !self.shop_items.contains(&id) {
                     self.shop_items.push(id);
@@ -693,16 +722,30 @@ impl Intake {
             }
             return true;
         }
-        let Some(cached) = self.collection_sync.take() else {
-            return false;
+        if self.syncer.is_none() {
+            let Some(cached) = self.collection_sync.take() else {
+                return false;
+            };
+            self.ensure_identity();
+            let Some(user) = self.client.identity().map(|i| i.username.clone()) else {
+                self.events
+                    .push(Event::Collection(Err(ApiError::TokenNeeded)));
+                return true;
+            };
+            self.syncer = Some(collection::Syncer::new(&user, cached.as_deref(), now));
+        }
+        let syncer = self.syncer.as_mut().expect("a sync");
+        let result = match syncer.step(&mut self.client) {
+            Ok(None) => {
+                let (read, pages) = syncer.progress();
+                self.online();
+                self.events.push(Event::CollectionProgress { read, pages });
+                return true;
+            }
+            Ok(Some(c)) => Ok(c),
+            Err(e) => Err(e),
         };
-        self.ensure_identity();
-        let Some(user) = self.client.identity().map(|i| i.username.clone()) else {
-            self.events
-                .push(Event::Collection(Err(ApiError::TokenNeeded)));
-            return true;
-        };
-        let result = collection::sync(&mut self.client, &user, cached.as_deref(), now);
+        self.syncer = None;
         match &result {
             Ok(_) => self.online(),
             Err(ApiError::Offline) => self.went_offline(),

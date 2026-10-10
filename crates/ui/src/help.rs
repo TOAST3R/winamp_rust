@@ -61,11 +61,7 @@ pub const GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("P", "show the playing entry"),
             (
                 "Shift+P",
-                "maximize the playlist beside a thin player strip (again: restore)",
-            ),
-            (
-                "Shift+G",
-                "group the crate by record, one row each with its cover (again: flat)",
+                "maximize the playlist under a mini player (again: restore)",
             ),
             (
                 "Space",
@@ -297,7 +293,7 @@ mod tests {
             .collect();
         for k in [
             "X", "]", "[", "Shift+]", "L", "Shift+L", "W", "S", "F", "H or F1", "D", "K", "T", "A",
-            "Cmd+V", "Y", "N", "I", "Tab", "P", "Shift+P", "Shift+G", "Space",
+            "Cmd+V", "Y", "N", "I", "Tab", "P", "Shift+P", "Space",
         ] {
             assert!(keys.contains(&k), "help is missing {k}");
         }

@@ -106,7 +106,7 @@ player, then the waveform and the equalizer when they show) and the playlist on 
 least as tall as the player column. It's drawn from an original pixel-art skin dressed like a
 DJ's gear (warm graphite panels, an amber LCD, title bars with groove lines), at double size
 by default (switch in **Options**: the gear ⚙ in the playlist's footer, or right-click the main
-window anywhere that isn't a control, or the player strip while the playlist is maximized;
+window anywhere that isn't a control, or the mini player while the playlist is maximized;
 Options also has the spectrogram, Discogs… and Browser…).
 
 Click in the player or in the playlist (or press `Tab`) to give it the keyboard: its title bar
@@ -133,7 +133,8 @@ and Home/End jump), and Enter plays the entry under it.
   - **Send to crate** (in an entry's right-click menu) copies the selection, in order, to
     another crate or a new one, skipping entries that crate already holds.
   - **Crate sidebar:** once the playlist is at least 600 pixels wide (or maximized), every crate
-    is listed on its left with its number of entries: • marks the one shown, and the player's
+    is listed on its left with its number of records (grouped or flat; its tooltip also
+    counts the tracks): • marks the one shown, and the player's
     play (or pause) sign marks the one your track comes from while it plays (or is paused).
     Your Discogs collection crate is pinned at the bottom under **DISCOGS**, in amber with a
     record icon, even if you rename it, followed by the labels you follow (**LABELS**, see
@@ -161,6 +162,8 @@ and Home/End jump), and Enter plays the entry under it.
     catalog number hold every word, in any order, ignoring case and accents ("ame" finds
     Âme; "lowtide 012" finds LT-012 on Lowtide Tapes). Matches are lit in the rows. Enter
     plays the first match, ↓ moves to the list, **Esc** clears the search (the filters stay).
+    Starting a search clears the BPM range and the record filters (not CART), so it always
+    looks through the whole crate; a filter set while searching still narrows it.
     Letters typed there never act as shortcuts. The search is forgotten when another crate is
     shown and on restart;
   - **BPM filter:** once the crate on screen has two different known tempos, the bar shows
@@ -201,7 +204,8 @@ and Home/End jump), and Enter plays the entry under it.
   - drag the bottom-right grip to make the playlist wider (any width) or taller (whole rows);
     its size is remembered, and narrowed to fit a smaller screen;
   - once the playlist is at least 480 pixels wide (at 1×), entries are drawn as columns: #,
-    Cat#, Artist, Title, Album, Format, BPM, Side, Year, For sale and Time. Drag a divider in the header to
+    Cat#, Artist, Title, Album, Format, Style, BPM, Side, Year, For sale and Time (Style sorts by
+    a record's first style). Drag a divider in the header to
     resize a column, and right-click the header to show or hide columns (#, Title and Time
     always show); both are remembered. Click a column's name to **sort** the crate by it, and
     click again for the other way (**≡ ▸ Sort** in the footer does the same at any width). A sort reorders
@@ -209,17 +213,17 @@ and Home/End jump), and Enter plays the entry under it.
     follow the new order. Entries without a value (no BPM yet, no catalog number) go last
     either way, and catalog numbers and sides sort naturally (LT-2 before LT-10);
   - **⇔** in the playlist's title bar (or `Shift+P`) maximizes the playlist: the window fills
-    the screen below the menu bar, the player folds into a thin strip on the left (play state,
-    elapsed time, previous, play/pause, next, and ⇔ to restore), the EQ hides, and the
-    waveform, when it's on, runs as a band across the full width above the playlist. Press
+    the screen below the menu bar, a band runs across the top with a mini player on the left
+    (play state, elapsed time and title on an LCD line; previous, play/pause, stop, next,
+    volume and ⇔ to restore under it) and the waveform beside it when it's on, the EQ hides,
+    and the playlist takes the full width under the band. Press
     ⇔ or `Shift+P` again to get the previous window and sizes back. It's remembered, and the
     app opens maximized next time;
-  - **▤** in the title bar (or `Shift+G`, or **≡ ▸ Group by record**) shows the crate one row
+  - **▤** in the title bar (or **≡ ▸ Group by record**) shows the crate one row
     per record: its cover, "Artist – Album" (the record's credit, so a compilation reads
     "Various – …") with its Discogs styles at the right, the catalog
     number, year, number of tracks and what's for sale (or, while one of its tracks plays, that
-    track). The column header is hidden while grouped (☰ › Sort still sorts), and the sidebar
-    counts a grouped crate's records instead of its tracks. **⏵** (or `Space` on it)
+    track). The column header is hidden while grouped (☰ › Sort still sorts). **⏵** (or `Space` on it)
     opens a record to show its tracks. A click selects the whole record, a double-click (or
     `Enter`) plays it from its first playable track, its menu acts on all of it, and dragging
     it moves it whole (a track moves only within its record). The arrows step over records.
@@ -295,7 +299,7 @@ and Home/End jump), and Enter plays the entry under it.
 | `Y` | add the playing track's record to the wantlist (again: remove it) | | `Cmd+V` | paste a Discogs page into the crate on screen |
 | `N` | pass the playing track | | `I` | open the playing release's for-sale page |
 | `Tab` | switch the keyboard between player and playlist | | `P` | show the playing entry |
-| `Shift+P` | maximize the playlist (again: restore) | | `Shift+G` | group the crate by record (again: flat) |
+| `Shift+P` | maximize the playlist (again: restore) | | | |
 | `Space` | open or close the record under the cursor (grouped) | | `Cmd+F` | search the crate on screen |
 
 On Linux and Windows, `Cmd` is `Ctrl`.
@@ -407,7 +411,9 @@ ahead of what plays. Other pasted text is ignored.
     sidebar (or in the title-bar crate menu when the playlist is narrow), make the crate match
     Discogs: records added there come in, records gone from there leave, and the main window
     says what changed ("Collection: 3 new, 1 gone"). They only read from Discogs, never change
-    it.
+    it. A collection refresh shows a window with a progress bar ("Reading your collection…
+    page 3 of 10", then "Adding records… 2 of 4") and **Stop**, which keeps the previous
+    collection, or the records that already came in.
   - The first sync reads 100 records a request. After that only what was added since is
     read, newest first, which is usually one request; everything is read again only when
     records were removed. Other pressings are never looked up, and without a token nothing
@@ -425,7 +431,9 @@ ahead of what plays. Other pasted text is ignored.
     `yt-dlp -U`.
   - The dialog also sets the default filter for every send (skip what you've passed) and the
     preview cache size (2 GB by default; the least recently played go first, except for
-    Download all tracks, which never deletes anything: see [Labels](#labels)).
+    Download all tracks, which never deletes anything: see [Labels](#labels)). A track whose
+    preview was deleted, or left in an older version's cache folder, downloads again when
+    it's played instead of turning red.
 - Previews are for listening while you dig. They stay in the cache and are never exported.
 
 ### Labels
@@ -1002,7 +1010,7 @@ Other environment variables, mostly for unattended runs and measurements:
 ## Tests
 
 ```sh
-cargo test --workspace            # 834 tests, under a minute after the first build; no audio hardware or display needed
+cargo test --workspace            # 842 tests, under a minute after the first build; no audio hardware or display needed
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 cargo check -p audio -p platform --target wasm32-unknown-unknown   # core stays web-portable

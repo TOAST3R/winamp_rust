@@ -730,7 +730,11 @@ impl DiggrApp {
                 };
                 match r {
                     MetaResult::Info(_, i) => playlist.set_info(id, i),
-                    MetaResult::Failed(_) => playlist.set_failed(id),
+                    MetaResult::Failed(_) => {
+                        if playlist.set_failed(id) {
+                            self.mark_crate(c);
+                        }
+                    }
                     MetaResult::Bpm(_, bpm) => {
                         if let Some(key) = playlist.get(id).map(|e| e.duplicate_key())
                             && let Some(bpm) = format::dj_bpm(bpm)
@@ -754,6 +758,7 @@ impl DiggrApp {
         self.check_armed();
         let queue = self.queue.clone();
         let queue_crate = self.queue_crate;
+        let mut requeued = None;
         let EngineSlot::Ready(engine) = &mut self.engine else {
             return;
         };
@@ -769,8 +774,9 @@ impl DiggrApp {
                 EngineEvent::TrackFailed { index, .. } => {
                     if let (Some(&id), Some(p)) =
                         (queue.get(index), self.crates.get_mut(queue_crate))
+                        && p.set_failed(id)
                     {
-                        p.set_failed(id);
+                        requeued = Some(id);
                     }
                 }
                 EngineEvent::TrackLoaded { id, track, .. } => {
@@ -859,6 +865,11 @@ impl DiggrApp {
             && let Some(p) = self.crates.get_mut(queue_crate)
         {
             p.set_current(Some(id));
+        }
+        // A track that was to play but whose preview is gone plays once downloaded again.
+        if let Some(id) = requeued {
+            self.armed = Some((queue_crate, id));
+            self.mark_crate(queue_crate);
         }
     }
 
@@ -1274,7 +1285,6 @@ impl DiggrApp {
                 _ => {}
             },
             Key::P if mods.shift && !mods.command => self.apply(Action::ToggleMaximized, ctx),
-            Key::G if mods.shift && !mods.command => self.apply(Action::ToggleGrouped, ctx),
             Key::P if !mods.command => self.show_playing_entry(),
             _ if !mods.command && self.arrows_move_cursor() => {
                 let mv = match key {
@@ -2139,15 +2149,10 @@ impl DiggrApp {
     }
 
     /// The playlist's width and rows now: the chosen ones, or, while maximized, what the
-    /// window leaves beside the strip (the chosen ones are kept for restoring).
+    /// window leaves under the band (the chosen ones are kept for restoring).
     fn pl_geometry(&self) -> (u16, usize) {
         if self.settings.playlist_maximized {
-            let (w, rows) = crate::layout::maximized(
-                &self.settings,
-                &self.skin.def,
-                self.win_px.x,
-                self.win_px.y,
-            );
+            let (w, rows) = crate::layout::maximized(&self.skin.def, self.win_px.x, self.win_px.y);
             (w, rows as usize)
         } else {
             (
@@ -2414,13 +2419,8 @@ impl DiggrApp {
                 }
                 None => {}
             }
-            // A grouped crate counts records, not tracks.
-            let grouped = c.is_grouped();
-            let shown_count = if grouped {
-                self.crates.record_count(c.id)
-            } else {
-                self.crates.entry_count(c.id)
-            };
+            // Every crate counts records, grouped or flat.
+            let shown_count = self.crates.record_count(c.id);
             let count_text = if undug {
                 String::new()
             } else {
@@ -2450,17 +2450,11 @@ impl DiggrApp {
             let mut resp = ui.interact(rr, Id::new(("pl_side", c.id)), Sense::click());
             if resp.hovered() && !dragging {
                 let tracks = entries_label(self.crates.entry_count(c.id));
-                let mut tip = if grouped {
-                    let n = self.crates.record_count(c.id);
-                    let records = if n == 1 {
-                        "1 record".to_owned()
-                    } else {
-                        format!("{n} records")
-                    };
-                    format!("{} ({records}, {tracks})", c.name)
-                } else {
-                    format!("{} ({tracks})", c.name)
+                let records = match shown_count {
+                    1 => "1 record".to_owned(),
+                    n => format!("{n} records"),
                 };
+                let mut tip = format!("{} ({records}, {tracks})", c.name);
                 if c.collection {
                     tip += "\nYour Discogs collection";
                 } else if c.wantlist {
@@ -3793,7 +3787,9 @@ impl DiggrApp {
         let out = ui
             .scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
                 let v = ui.visuals_mut();
+                // egui paints selected glyphs in the selection stroke colour, not `text_color`.
                 v.selection.bg_fill = Color32::TRANSPARENT;
+                v.selection.stroke = egui::Stroke::NONE;
                 v.text_cursor.stroke = egui::Stroke::NONE;
                 egui::TextEdit::singleline(&mut self.pl_search)
                     .id(Id::new("pl_search"))
@@ -3842,12 +3838,27 @@ impl DiggrApp {
             return;
         }
         let chars: Vec<char> = self.pl_search.chars().collect();
-        let caret = out
-            .cursor_range
-            .map_or(chars.len(), |r| r.primary.index.0.min(chars.len()));
+        let (caret, other) = out.cursor_range.map_or((chars.len(), chars.len()), |r| {
+            (
+                r.primary.index.0.min(chars.len()),
+                r.secondary.index.0.min(chars.len()),
+            )
+        });
         let start = caret.saturating_sub(fits.saturating_sub(1));
         let shown: String = chars[start..].iter().take(fits).collect();
         fsk.text(x + 3.0, ty, &shown, color(colors.lcd));
+        // The selection: an LCD block, its characters in the field's dark.
+        let end = (start + fits).min(chars.len());
+        let (lo, hi) = (caret.min(other).max(start), caret.max(other).min(end));
+        if focused && lo < hi {
+            let sx = x + 3.0 + (lo - start) as f32 * adv;
+            fsk.fill(
+                fsk.rect(sx - 1.0, y + 2.0, (hi - lo) as f32 * adv + 1.0, h - 4.0),
+                color(colors.lcd),
+            );
+            let sel: String = chars[lo..hi].iter().collect();
+            fsk.text(sx, ty, &sel, color(colors.pl_bg));
+        }
         if focused {
             let cx = x + 3.0 + (caret - start) as f32 * adv - 1.0;
             fsk.fill(fsk.rect(cx, y + 2.0, 1.0, h - 4.0), color(colors.lcd));
@@ -5916,8 +5927,8 @@ fn badge(
     rect.width() + 3.0 * scale
 }
 
-/// A momentary skin button at any rectangle (the strip's buttons have no layout entry).
-fn strip_button(ui: &mut Ui, sk: &Skinned, id: &str, rect: Rect, sprite: &str) -> egui::Response {
+/// A momentary skin button at any rectangle (the mini player's buttons have no layout entry).
+fn sprite_button(ui: &mut Ui, sk: &Skinned, id: &str, rect: Rect, sprite: &str) -> egui::Response {
     let resp = ui.interact(rect, Id::new(id), Sense::click());
     let name = if resp.is_pointer_button_down_on() {
         format!("{sprite}_p")
@@ -6372,11 +6383,6 @@ impl DiggrApp {
             let d = self.skin.def.clone();
             self.win_px = ui.max_rect().size() / scale;
             let maximized = self.settings.playlist_maximized;
-            let player_w = if maximized {
-                crate::layout::STRIP_W as f32
-            } else {
-                d.main_size.0 as f32
-            };
             // A click gives its side the keyboard (lit in this same frame).
             if let Some(p) = ctx.input(|i| {
                 i.pointer
@@ -6384,8 +6390,13 @@ impl DiggrApp {
                     .then(|| i.pointer.interact_pos())
                     .flatten()
             }) {
-                let playlist_x = origin.x + player_w * scale;
-                self.focus = if self.settings.show_playlist && p.x >= playlist_x {
+                // Maximized, the player is the band on top; otherwise the column on the left.
+                let on_playlist = if maximized {
+                    p.y >= origin.y + crate::layout::BAND_H as f32 * scale
+                } else {
+                    p.x >= origin.x + d.main_size.0 as f32 * scale
+                };
+                self.focus = if self.settings.show_playlist && on_playlist {
                     Focus::Playlist
                 } else {
                     Focus::Player
@@ -6482,34 +6493,50 @@ impl DiggrApp {
         }
     }
 
-    /// The maximized playlist: the player as a thin strip on the left, the waveform (when on)
-    /// as a band across the rest, and the playlist under it, filling the window.
+    /// The maximized playlist: a band on top with the mini player on the left and the
+    /// waveform (when on) beside it, and the playlist under it, filling the window.
     fn maximized_layout(&mut self, ui: &mut Ui, origin: Pos2) {
         let scale = self.settings.scale as f32;
-        let strip = crate::layout::STRIP_W as f32;
-        self.player_strip(ui, origin);
-        let mut y = 0.0;
+        let (mini_w, band_h) = (self.def.main_size.0 as f32, crate::layout::BAND_H as f32);
+        let rest = Rect::from_min_size(
+            origin + vec2(mini_w * scale, 0.0),
+            vec2(self.win_px.x - mini_w, band_h) * scale,
+        );
         if self.settings.show_waveform {
-            let rect = Rect::from_min_size(
-                origin + vec2(strip * scale, 0.0),
-                vec2(self.win_px.x - strip, crate::waveform::HEIGHT as f32) * scale,
+            self.waveform_section(ui, rest);
+        } else {
+            let def = self.def.clone();
+            let sk = self.skinned(&def, ui, rest.min);
+            sk.sprite_in(
+                "pl_bottom_fill",
+                sk.rect(0.0, 0.0, rest.width() / scale, band_h),
             );
-            self.waveform_section(ui, rect);
-            y = crate::waveform::HEIGHT as f32;
         }
-        self.playlist_section(ui, origin + vec2(strip * scale, y * scale));
+        self.mini_player(ui, origin);
+        self.playlist_section(ui, origin + vec2(0.0, band_h * scale));
     }
 
-    /// The player folded to a strip: play state, elapsed mm over ss, previous, play or pause,
-    /// next, and ⇔ to restore. A click on it gives the player the keyboard.
-    fn player_strip(&mut self, ui: &mut Ui, origin: Pos2) {
-        let def = self.def.clone();
+    /// The player folded into the band: play state, time and title on an LCD line; previous,
+    /// play or pause, stop, next, volume and ⇔ to restore under it. A right-click off the
+    /// controls opens the Options menu.
+    fn mini_player(&mut self, ui: &mut Ui, origin: Pos2) {
+        let mut def = (*self.def).clone();
+        let (w, h) = (def.main_size.0 as f32, crate::layout::BAND_H as f32);
+        // The volume slider's place here: `hslider` reads its rectangle from the layout.
+        def.layout.insert(
+            "mini_volume".into(),
+            crate::skin::R {
+                x: 104,
+                y: 36,
+                ..def.at("volume")
+            },
+        );
         let sk = self.skinned(&def, ui, origin);
-        let w = crate::layout::STRIP_W as f32;
-        let h = self.win_px.y;
         sk.sprite_in("pl_bottom_fill", sk.rect(0.0, 0.0, w, h));
         let mut actions = Vec::new();
-        self.options_menu(ui, sk.rect(0.0, 0.0, w, h), "strip_options", &mut actions);
+        self.options_menu(ui, sk.rect(0.0, 0.0, w, h), "mini_options", &mut actions);
+        let colors = &def.colors;
+        sk.fill(sk.rect(4.0, 4.0, w - 8.0, 22.0), color(colors.pl_bg));
         let state = self.position.state;
         sk.sprite(
             match state {
@@ -6517,44 +6544,71 @@ impl DiggrApp {
                 PlayState::Paused => "status_pause",
                 PlayState::Stopped => "status_stop",
             },
-            9.0,
-            5.0,
+            8.0,
+            11.0,
         );
         let (mm, ss) = format::lcd(self.position.seconds());
-        let digits = |text: &str, y: f32| {
-            let chars: Vec<char> = text.chars().collect();
-            let two = &chars[chars.len().saturating_sub(2)..];
-            for (i, c) in two.iter().enumerate() {
-                let name = if state == PlayState::Stopped {
-                    "digit_blank".to_owned()
-                } else {
-                    format!("digit_{c}")
-                };
-                sk.sprite(&name, 4.0 + 10.0 * i as f32, y);
+        let digit = |c: char| {
+            if state == PlayState::Stopped {
+                "digit_blank".to_owned()
+            } else {
+                format!("digit_{c}")
             }
         };
-        digits(&mm, 18.0);
-        digits(&ss, 33.0);
+        let mins: Vec<char> = mm.chars().collect();
+        for (i, c) in mins.iter().rev().take(2).enumerate() {
+            sk.sprite(&digit(*c), 30.0 - 10.0 * i as f32, 9.0);
+        }
+        if state != PlayState::Stopped {
+            sk.sprite("digit_colon", 40.0, 9.0);
+        }
+        for (i, c) in ss.chars().enumerate() {
+            sk.sprite(&digit(c), 44.0 + 10.0 * i as f32, 9.0);
+        }
+        let title = self
+            .now_playing_line()
+            .unwrap_or_else(|| engine_status(&self.engine));
+        let (tx, tw) = (70.0, w - 4.0 - 70.0 - 4.0);
+        let fits = (tw / def.font.advance as f32) as usize;
+        let ty = 4.0 + ((22.0 - def.font.glyph_h as f32) / 2.0).round();
+        let shown = format::scroll(&title, fits, self.title_offset);
+        sk.text(tx, ty, &shown, color(colors.lcd));
         let (play_sprite, play_action) = if state == PlayState::Playing {
             ("pause", Action::Pause)
         } else {
             ("play", Action::Play)
         };
         for (i, (id, sprite, action)) in [
-            ("strip_prev", "prev", Action::Prev),
-            ("strip_play", play_sprite, play_action),
-            ("strip_next", "next", Action::Next),
+            ("mini_prev", "prev", Action::Prev),
+            ("mini_play", play_sprite, play_action),
+            ("mini_stop", "stop", Action::Stop),
+            ("mini_next", "next", Action::Next),
         ]
         .into_iter()
         .enumerate()
         {
-            let r = sk.rect(2.0, 52.0 + 20.0 * i as f32, 23.0, 18.0);
-            if strip_button(ui, &sk, id, r, sprite).clicked() {
+            let r = sk.rect(4.0 + 23.0 * i as f32, 34.0, 23.0, 18.0);
+            if sprite_button(ui, &sk, id, r, sprite).clicked() {
                 actions.push(action);
             }
         }
-        let r = sk.rect(9.0, h - 14.0, 9.0, 9.0);
-        if strip_button(ui, &sk, "strip_max", r, "btn_max").clicked() {
+        let vol = SliderSprites {
+            track: "volume_track",
+            fill: Some("volume_fill"),
+            thumb: "volume_thumb",
+        };
+        if let (_, Some(v)) = widgets::hslider(
+            ui,
+            &sk,
+            "mini_vol",
+            "mini_volume",
+            vol,
+            self.settings.volume,
+        ) {
+            actions.push(Action::Volume(v));
+        }
+        let r = sk.rect(w - 13.0, 38.0, 9.0, 9.0);
+        if sprite_button(ui, &sk, "mini_max", r, "btn_max").clicked() {
             actions.push(Action::ToggleMaximized);
         }
         for a in actions {
@@ -7969,10 +8023,10 @@ mod headless_tests {
             rig.app.settings.playlist_width,
             rig.app.settings.playlist_rows,
         );
-        // The rig's window is 1100 × 400: the playlist takes it beside the strip, in columns.
+        // The rig's window is 1100 × 400: the playlist takes its full width, in columns.
         let out = rig.frame(Vec::new());
         assert!(shows(&out, "Cat#"), "{:?}", text_list(&out));
-        assert_eq!(rig.app.pl_geometry().0, 1100 - crate::layout::STRIP_W);
+        assert_eq!(rig.app.pl_geometry().0, 1100);
         let out = rig.key(Key::P, Modifiers::SHIFT);
         assert!(!rig.app.settings.playlist_maximized);
         assert_eq!(maximize_commands(&out), [false]);
@@ -7988,25 +8042,33 @@ mod headless_tests {
     }
 
     #[test]
-    fn the_strip_steers_playback_and_restores_the_layout() {
+    fn the_mini_player_steers_playback_and_restores_the_layout() {
         let mut rig = Rig::new(
-            "strip",
+            "mini-player",
             vec![fixture("tone.flac"), fixture("tone.wav")],
             |_| {},
         );
         rig.until(|r| r.app.position.state == PlayState::Playing, "playing");
         let ids = rig.ids(PLAYLIST);
         rig.key(Key::P, Modifiers::SHIFT);
+        let rows = rig.app.pl_geometry().1;
         let out = rig.frame(Vec::new());
         assert!(!shows(&out, "DIGGR EQUALIZER"));
-        // Next is the third button, 52 + 2 × 20 skin pixels down the strip.
-        rig.click(pos2(13.0, 92.0 + 9.0));
+        // W off still keeps the band: the rows don't move.
+        rig.key(Key::W, Modifiers::NONE);
+        assert_eq!(rig.app.pl_geometry().1, rows);
+        // Next is the fourth button of the second line.
+        rig.click(pos2(4.0 + 23.0 * 3.0 + 11.0, 34.0 + 9.0));
         rig.until(
             |r| r.app.crates.playing().current() == Some(ids[1]),
-            "the strip's next starts the next track",
+            "the mini player's next starts the next track",
         );
-        // ⇔ at the strip's foot restores.
-        rig.click(pos2(13.0, 400.0 - 14.0 + 4.0));
+        // A right-click on its LCD line opens the options.
+        rig.click_with(pos2(150.0, 15.0), PointerButton::Secondary);
+        assert!(shows(&rig.frame(Vec::new()), "Spectrogram (S)"));
+        rig.key(Key::Escape, Modifiers::NONE);
+        // ⇔ at its right end restores.
+        rig.click(pos2(275.0 - 13.0 + 4.0, 38.0 + 4.0));
         assert!(!rig.app.settings.playlist_maximized);
     }
 
@@ -8028,15 +8090,15 @@ mod headless_tests {
     }
 
     #[test]
-    fn the_waveform_band_spans_the_maximized_window_and_seeks() {
+    fn the_waveform_sits_beside_the_mini_player_and_seeks() {
         let mut rig = Rig::new("band", vec![fixture("tone.flac")], |_| {});
         rig.app.settings.show_waveform = true;
         rig.until(|r| r.app.position.state == PlayState::Playing, "playing");
         rig.key(Key::P, Modifiers::SHIFT);
         rig.frame(Vec::new());
-        // Three quarters across the band's overview row: 1.5 s of the 2 s tone.
-        let strip = crate::layout::STRIP_W as f32;
-        let x = strip + (1100.0 - strip) * 0.75;
+        // Three quarters across the overview row, right of the mini player: 1.5 s of 2 s.
+        let mini = rig.app.skin.def.main_size.0 as f32;
+        let x = mini + (1100.0 - mini) * 0.75;
         rig.click(pos2(x, 6.0));
         rig.until(
             |r| (r.app.position.seconds() - 1.5).abs() < 0.2,
@@ -8694,10 +8756,10 @@ mod headless_tests {
         let out = rig.frame(Vec::new());
         assert!(!shows(&out, "Double size (2×)"), "{:?}", text_list(&out));
 
-        // While the playlist is maximized, the strip has it too.
+        // While the playlist is maximized, the mini player has it too.
         rig.app.settings.playlist_maximized = true;
         rig.frame(Vec::new());
-        rig.click_with(pos2(13.0, 150.0), PointerButton::Secondary);
+        rig.click_with(pos2(150.0, 15.0), PointerButton::Secondary);
         let out = rig.frame(Vec::new());
         assert!(shows(&out, "Spectrogram (S)"), "{:?}", text_list(&out));
     }
@@ -9195,6 +9257,60 @@ mod headless_tests {
             rig.app.crates.shown().shown_rows().is_empty(),
             "nothing matches"
         );
+    }
+
+    #[test]
+    fn search_label_clears_a_bpm_range_set_before_it() {
+        let (mut rig, _) = search_rig("search-clears");
+        for (e, b) in rig.app.crates.shown_mut().entries_mut().zip([80, 120, 150]) {
+            e.bpm = Some(b);
+        }
+        rig.app.crates.shown_mut().set_bpm_filter(Some((92, 171)));
+        assert!(rig.app.crates.shown().bpm_filter().is_some());
+        rig.app
+            .crates
+            .shown_mut()
+            .set_pick(Facet::Artist, "C", true);
+        let ctx = rig.ctx.clone();
+        rig.app.apply(Action::SearchFor("lowtide".into()), &ctx);
+        let p = rig.app.crates.shown();
+        assert_eq!(p.bpm_filter(), None);
+        assert!(!p.picked(Facet::Artist, "C"));
+        assert_eq!(p.shown_rows(), [0, 2], "the whole crate is searched");
+    }
+
+    #[test]
+    fn a_selected_search_is_drawn_once_in_the_skin() {
+        let (mut rig, _) = search_rig("search-select");
+        rig.click(search_at());
+        type_keys(&mut rig, "vigne");
+        let out = rig.key(Key::A, Modifiers::COMMAND);
+        // egui's own glyphs stay invisible, selected or not.
+        fn visible_glyphs(shape: &egui::Shape) -> bool {
+            match shape {
+                egui::Shape::Text(t) => t
+                    .galley
+                    .rows
+                    .iter()
+                    .any(|r| r.row.visuals.mesh.vertices.iter().any(|v| v.color.a() > 0)),
+                egui::Shape::Vec(v) => v.iter().any(visible_glyphs),
+                _ => false,
+            }
+        }
+        assert!(!out.shapes.iter().any(|s| visible_glyphs(&s.shape)));
+        let lcd = color(rig.app.def.colors.lcd);
+        let field = Rect::from_center_size(search_at(), vec2(60.0, 16.0));
+        let blocks = |out: &egui::FullOutput| {
+            rects(out)
+                .into_iter()
+                .filter(|(r, c)| *c == lcd && r.width() > 2.0 && field.intersects(*r))
+                .count()
+        };
+        assert_eq!(blocks(&out), 1, "the selection is an LCD block");
+        type_keys(&mut rig, "a");
+        let out = rig.frame(Vec::new());
+        assert_eq!(rig.app.pl_search, "a");
+        assert_eq!(blocks(&out), 0, "nothing selected after typing over it");
     }
 
     #[test]
