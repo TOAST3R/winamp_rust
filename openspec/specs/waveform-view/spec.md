@@ -4,7 +4,7 @@
 TBD - created by archiving change waveform-navigation. Update Purpose after archive.
 ## Requirements
 ### Requirement: Waveform section
-The player SHALL offer a waveform section under the main window, in the player column, toggled with `W` or the main window's waveform button and remembered across launches, showing a whole-track overview row and a zoomed row centered on the playhead. In the player column, the section SHALL have a title bar like the equalizer's, reading "DIGGR WAVEFORM", that drags the window and has a close button that hides the waveform like `W`. While the playlist is maximized, the section SHALL be drawn as a band across the full width of the playlist area, above the playlist, with the same rows, seeking and zoom, and without the title bar.
+The player SHALL offer a waveform section under the main window, in the player column, toggled with `W` or the main window's waveform button and remembered across launches, showing a whole-track overview row and a zoomed row centered on the playhead. In the player column, the section SHALL have a title bar like the equalizer's, reading "DIGGR WAVEFORM", that drags the window and has a close button that hides the waveform like `W`. While the playlist is maximized, the section SHALL be drawn in the top band, to the right of the mini player (see `playlist` "Maximized playlist") and across the rest of the window's width, with the same rows, seeking and zoom, and without the title bar.
 
 #### Scenario: Toggle
 - **WHEN** the user presses W
@@ -22,9 +22,9 @@ The player SHALL offer a waveform section under the main window, in the player c
 - **WHEN** the user clicks the waveform title bar's close button
 - **THEN** the waveform section hides, exactly as with W
 
-#### Scenario: Full-width band
-- **WHEN** the playlist is maximized in a 1440-point-wide window and the waveform is on
-- **THEN** the overview row spans the playlist area's full width, and clicking in it seeks
+#### Scenario: Beside the mini player
+- **WHEN** the playlist is maximized in a window 1000 skin pixels wide and the waveform is on
+- **THEN** the overview row starts right of the 275-pixel mini player and spans the remaining 725 pixels, and clicking in it seeks
 
 ### Requirement: Frequency colouring
 The waveform SHALL colour each column by its low/mid/high energy, with bass towards red, mids towards green, and highs towards blue.
