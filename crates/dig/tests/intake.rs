@@ -1152,3 +1152,83 @@ fn a_cart_add_is_one_request_then_the_cart_is_read() {
     assert!(snap.has_listing(11));
     assert_eq!(t.paths(), ["/cart/items", "/cart"]);
 }
+
+#[test]
+fn friends_are_read_with_private_ones_checked_again_and_a_friends_collection_page_by_page() {
+    let t = Arc::new(FakeTransport::with_fixtures(fixtures()));
+    t.route(
+        "/users/digger/friends?page=1&per_page=100",
+        200,
+        r#"{"pagination": {"page": 1, "pages": 1},
+            "friends": [{"user": {"username": "javimaxilo"}}, {"user": {"username": "Waxport"}}]}"#,
+    );
+    t.route(
+        "/users/Waxport/collection/folders/0/releases?page=1&per_page=1",
+        403,
+        "{}",
+    );
+    let mut i = intake(&t, true, None);
+    t.route(
+        "/users/javimaxilo/collection/folders/0/releases?page=1&per_page=1",
+        200,
+        "{}",
+    );
+    i.handle(Command::ReadFriends);
+    let ev = run(&mut i, 20);
+    let list = ev
+        .iter()
+        .find_map(|e| match e {
+            Event::Friends(Ok(l)) => Some(l.clone()),
+            _ => None,
+        })
+        .expect("a friends list");
+    assert_eq!(
+        list,
+        [
+            ("javimaxilo".to_owned(), false),
+            ("Waxport".to_owned(), true)
+        ]
+    );
+    let checks = t
+        .paths()
+        .iter()
+        .filter(|p| p.ends_with("per_page=1"))
+        .count();
+    assert_eq!(checks, 2, "each friend's collection is checked");
+
+    // A friend's collection, two pages: progress, then the whole of it.
+    for n in 1..=2u64 {
+        t.route(
+            format!(
+                "/users/javimaxilo/collection/folders/0/releases?sort=added&sort_order=desc&page={n}&per_page=100"
+            ),
+            200,
+            format!(
+                r#"{{"pagination": {{"page": {n}, "pages": 2, "items": 2}},
+                    "releases": [{{"id": {r}, "instance_id": {n}, "basic_information": {{"id": {r}}}}}]}}"#,
+                r = 1000 + n
+            ),
+        );
+    }
+    i.handle(Command::ReadFriendCollection {
+        target: 7,
+        user: "javimaxilo".into(),
+    });
+    let ev = run(&mut i, 20);
+    assert!(ev.iter().any(|e| matches!(
+        e,
+        Event::FriendProgress {
+            target: 7,
+            read: 1,
+            pages: 2
+        }
+    )));
+    let c = ev
+        .iter()
+        .find_map(|e| match e {
+            Event::FriendCollection(7, Ok(c)) => Some(c.releases.len()),
+            _ => None,
+        })
+        .expect("the collection");
+    assert_eq!(c, 2);
+}

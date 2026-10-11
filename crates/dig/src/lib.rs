@@ -19,6 +19,7 @@ pub mod collection;
 pub mod config;
 pub mod cover;
 pub mod discogs;
+pub mod friends;
 pub mod intake;
 pub mod jobs;
 pub mod memory;
