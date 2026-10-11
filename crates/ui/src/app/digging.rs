@@ -158,6 +158,7 @@ pub enum DigAction {
     OpenBrowserDialog,
     /// Top Sellers and the cart.
     Seller(super::sellers::SellerAction),
+    Friend(super::friends::FriendAction),
 }
 
 /// What Options ▸ Browser… asks for.
@@ -332,6 +333,10 @@ pub(super) struct Dig {
     pub(super) covers: CoverCache,
     /// Top Sellers (`sellers.ron`).
     pub(super) sellers: SellerList,
+    /// Friends (`friends.ron`).
+    pub(super) friends: dig::friends::FriendList,
+    /// A friend's crate being refreshed: its collection read so far (pages read, in all).
+    pub(super) friend_refresh: Option<(CrateId, Option<(u32, u32)>)>,
     /// The user's Discogs cart as last read (`cart.ron` in the cache).
     pub(super) cart: CartSnapshot,
     /// Top Sellers' dialogs and running refreshes.
@@ -367,6 +372,10 @@ impl Dig {
         let memory = config.as_deref().map(DigMemory::load).unwrap_or_default();
         let token = config.as_deref().and_then(digconf::load_token);
         let sellers = config.as_deref().map(SellerList::load).unwrap_or_default();
+        let friends = config
+            .as_deref()
+            .map(dig::friends::FriendList::load)
+            .unwrap_or_default();
         let bandcamp = super::bandcamp::BandcampState::new(
             config
                 .as_deref()
@@ -380,6 +389,8 @@ impl Dig {
             .unwrap_or_default();
         Self {
             sellers,
+            friends,
+            friend_refresh: None,
             cart,
             seller_ui: Default::default(),
             setup,
@@ -448,6 +459,14 @@ impl Dig {
         self.token.is_some()
     }
 
+    pub(super) fn save_friends(&self) -> Option<String> {
+        let c = self.config.as_deref()?;
+        self.friends
+            .save(c)
+            .err()
+            .map(|e| format!("Could not save Friends: {e}"))
+    }
+
     pub(super) fn save_sellers(&self) -> Option<String> {
         let c = self.config.as_deref()?;
         self.sellers
@@ -470,7 +489,17 @@ impl Dig {
         if !self.sellers.seeded {
             self.send(Command::FirstSellers);
         }
+        if self.friends.due(now_secs()) {
+            self.send(Command::ReadFriends);
+        }
         self.send(Command::ReadCart { soon: false });
+    }
+
+    /// The refresh window's fill of crate `c` ends once no send into it is left.
+    fn end_fill_if_idle(&mut self, c: CrateId) {
+        if self.refilling.is_some_and(|(r, _)| r == c) && !self.has_job_for(c) {
+            self.refilling = None;
+        }
     }
 
     /// A send into this crate is listed or expanding.
@@ -1056,7 +1085,7 @@ fn formats_text(formats: &[Format]) -> String {
         .join(", ")
 }
 
-fn now_secs() -> u64 {
+pub(super) fn now_secs() -> u64 {
     dig::now_secs()
 }
 
@@ -1291,6 +1320,19 @@ impl DiggrApp {
                 _ if d.collection_syncing => ("Reading your collection…".to_owned(), 0.0),
                 _ => return,
             }
+        } else if let Some((c, read)) = d.friend_refresh {
+            let who = self
+                .dig
+                .as_ref()
+                .and_then(|d| d.friends.by_crate(c))
+                .map_or_else(String::new, |f| f.username.clone());
+            match read {
+                Some((read, pages)) if pages > 0 => (
+                    format!("Reading {who}'s collection… page {read} of {pages}"),
+                    read as f32 / pages as f32,
+                ),
+                _ => (format!("Reading {who}'s collection…"), 0.0),
+            }
         } else if let (Some(_), Some((done, total))) = (d.refilling, fill) {
             (
                 format!("Adding records… {done} of {total}"),
@@ -1299,8 +1341,20 @@ impl DiggrApp {
         } else {
             return;
         };
+        let Some(d) = &self.dig else { return };
+        // Named after the crate being refreshed, unless it's the user's own collection.
+        let title = match d
+            .friend_refresh
+            .map(|(c, _)| c)
+            .or(d.refilling.map(|(c, _)| c))
+        {
+            Some(c) if !d.refreshing_collection && Some(c) != self.collection_crate() => {
+                format!("Refresh {}", self.crates.name(c))
+            }
+            _ => "Refresh collection".to_owned(),
+        };
         let mut stop = false;
-        egui::Window::new("Refresh collection")
+        egui::Window::new(title)
             .id(egui::Id::new("collection-refresh"))
             .collapsible(false)
             .resizable(false)
@@ -1323,12 +1377,21 @@ impl DiggrApp {
             d.collection_syncing = false;
             d.sync_progress = None;
         }
+        let mut what = "Refresh collection".to_owned();
+        if let Some((c, _)) = d.friend_refresh.take() {
+            d.send(Command::CancelCollectionSync);
+            what = format!("Refresh {}", self.crates.name(c));
+        }
+        let Some(d) = &mut self.dig else { return };
         if let Some((c, _)) = d.refilling.take() {
             d.send(Command::StopJobs(c));
             d.stopped_fill.insert(c);
+            if Some(c) != self.collection_crate() {
+                what = format!("Refresh {}", self.crates.name(c));
+            }
             self.drop_listed(c);
         }
-        self.notify("Refresh collection stopped");
+        self.notify(format!("{what} stopped"));
     }
 
     /// Takes out crate `c`'s entries still listed without their record's details.
@@ -2012,6 +2075,7 @@ impl DiggrApp {
             Event::Finished(j) => {
                 let Some(d) = &mut self.dig else { return };
                 d.jobs.remove(&j.id);
+                d.end_fill_if_idle(j.target);
                 if !d.jobs.values().any(|v| v.target == j.target)
                     && d.stopped_fill.remove(&j.target)
                 {
@@ -2032,6 +2096,11 @@ impl DiggrApp {
             Event::Failed(j, err) => {
                 let Some(d) = &mut self.dig else { return };
                 d.jobs.remove(&j.id);
+                d.end_fill_if_idle(j.target);
+                if err == ApiError::Private && d.friends.by_crate(j.target).is_some() {
+                    return self.friend_private(j.target);
+                }
+                let Some(d) = &mut self.dig else { return };
                 if d.play_when_ready == Some(j.target) {
                     d.play_when_ready = None;
                 }
@@ -2083,6 +2152,13 @@ impl DiggrApp {
                 Err(e) => self.notify(e.message()),
             },
             Event::TokenChecked(token, result) => self.dig_token_checked(token, result),
+            Event::Friends(result) => self.dig_friends(result),
+            Event::FriendProgress {
+                target,
+                read,
+                pages,
+            } => self.friend_progress(target, read, pages),
+            Event::FriendCollection(target, result) => self.friend_collection(target, result),
             Event::CollectionProgress { read, pages } => {
                 if let Some(d) = &mut self.dig {
                     d.sync_progress = Some((read, pages));
@@ -2996,6 +3072,7 @@ impl DiggrApp {
     pub(super) fn dig_act(&mut self, c: CrateId, a: DigAction) {
         match a {
             DigAction::Seller(a) => self.seller_act(a),
+            DigAction::Friend(a) => self.friend_act(a),
             DigAction::Want(ids) => self.dig_want(c, &ids),
             DigAction::Unwant(ids) => self.dig_unwant(c, &ids),
             DigAction::Collect(ids) => self.dig_collect(c, &ids, false),
@@ -3182,43 +3259,57 @@ impl DiggrApp {
         let (Some(coll), Some(owned)) = (self.collection_crate(), owned) else {
             return;
         };
-        if !self.crates.load(coll) {
-            return;
-        }
-        let present: HashSet<u64> = self
-            .crates
-            .get(coll)
-            .map(|p| p.entries().iter().filter_map(release_of).collect())
-            .unwrap_or_default();
-        let gone: HashSet<u64> = present.difference(&owned).copied().collect();
-        let new: Vec<u64> = owned.difference(&present).copied().collect();
-        let ids = self.entries_of(coll, &gone);
-        if let Some(p) = self.crates.get_mut(coll)
-            && p.remove_ids(&ids) > 0
-        {
-            self.mark_crate(coll);
-        }
         let user = self
             .dig
             .as_ref()
             .and_then(|d| d.identity.as_ref())
             .map(|i| i.username.clone());
+        if let Some((new, gone)) = self.follow_releases(coll, &owned, user) {
+            self.notify(changes_line("Collection", new, gone));
+        }
+    }
+
+    /// Makes crate `c` hold exactly the records of `releases` (a collection read whole):
+    /// records no longer there leave, and the missing ones are sent (`user`'s collection page
+    /// when there are many). Returns how many came and went; `None` if the crate can't load.
+    pub(super) fn follow_releases(
+        &mut self,
+        c: CrateId,
+        releases: &HashSet<u64>,
+        user: Option<String>,
+    ) -> Option<(usize, usize)> {
+        if !self.crates.load(c) {
+            return None;
+        }
+        let present: HashSet<u64> = self
+            .crates
+            .get(c)
+            .map(|p| p.entries().iter().filter_map(release_of).collect())
+            .unwrap_or_default();
+        let gone: HashSet<u64> = present.difference(releases).copied().collect();
+        let new: Vec<u64> = releases.difference(&present).copied().collect();
+        let ids = self.entries_of(c, &gone);
+        if let Some(p) = self.crates.get_mut(c)
+            && p.remove_ids(&ids) > 0
+        {
+            self.mark_crate(c);
+        }
         match user {
             Some(u) if new.len() > FILL_ONE_BY_ONE => {
-                self.dig_fill(Page::new(url::PageKind::Collection(u)), coll);
+                self.dig_fill(Page::new(url::PageKind::Collection(u)), c);
             }
             _ => {
                 for &r in &new {
-                    self.dig_fill(Page::new(url::PageKind::Release(r)), coll);
+                    self.dig_fill(Page::new(url::PageKind::Release(r)), c);
                 }
             }
         }
         if !new.is_empty()
             && let Some(d) = &mut self.dig
         {
-            d.refilling = Some((coll, false));
+            d.refilling = Some((c, false));
         }
-        self.notify(changes_line("Collection", new.len(), gone.len()));
+        Some((new.len(), gone.len()))
     }
 
     /// The records of entries `ids` of crate `c`: each release once, with its first entry,
@@ -3321,7 +3412,7 @@ impl DiggrApp {
 
     /// Fetches a record's clips into a crate it may only partly be in (no request when the
     /// release is cached), without announcing it.
-    fn dig_fill(&mut self, page: Page, target: CrateId) {
+    pub(super) fn dig_fill(&mut self, page: Page, target: CrateId) {
         let Some(d) = &mut self.dig else { return };
         if !d.started() {
             return;

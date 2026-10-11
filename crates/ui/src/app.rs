@@ -36,6 +36,8 @@ mod covers;
 #[cfg(not(target_arch = "wasm32"))]
 mod digging;
 #[cfg(not(target_arch = "wasm32"))]
+mod friends;
+#[cfg(not(target_arch = "wasm32"))]
 mod sellers;
 #[cfg(not(target_arch = "wasm32"))]
 pub use digging::{BridgeSetup, DigAction, DigSetup, SendMode};
@@ -2205,6 +2207,23 @@ impl DiggrApp {
         (Vec::new(), false)
     }
 
+    /// The friend crates for the sidebar (crate, dug, private, refreshing), in Discogs'
+    /// order, and whether FRIENDS is folded.
+    fn sidebar_friends(&self) -> (Vec<(CrateId, bool, bool, bool)>, bool) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (rows, folded) = self.friend_rows();
+            (
+                rows.into_iter()
+                    .map(|r| (r.crate_id, r.dug, r.private, r.busy))
+                    .collect(),
+                folded,
+            )
+        }
+        #[cfg(target_arch = "wasm32")]
+        (Vec::new(), false)
+    }
+
     /// The crate sidebar shows exactly when it fits.
     fn pl_sidebar(&self) -> bool {
         self.pl_sidebar_fits()
@@ -2237,7 +2256,16 @@ impl DiggrApp {
         let painter = sk.painter.with_clip_rect(sk.rect(x, y, w - 1.0, h));
         let rows = ((h / row_h).floor() as usize).max(1);
         let (sellers, folded) = self.sidebar_sellers();
-        let seller_ids: HashSet<CrateId> = sellers.iter().map(|s| s.0).collect();
+        let (friends, friends_folded) = self.sidebar_friends();
+        let friend_of: HashMap<CrateId, (bool, bool, bool)> = friends
+            .iter()
+            .map(|&(id, dug, private, busy)| (id, (dug, private, busy)))
+            .collect();
+        let seller_ids: HashSet<CrateId> = sellers
+            .iter()
+            .map(|s| s.0)
+            .chain(friend_of.keys().copied())
+            .collect();
         let labels: Vec<_> = self.crates.labels().cloned().collect();
         let (mine, collection): (Vec<_>, Vec<_>) = self
             .crates
@@ -2253,7 +2281,11 @@ impl DiggrApp {
         let mut collection = collection;
         collection.sort_by_key(|c| !c.wantlist);
         let mut bottom: Vec<SideRow> = Vec::new();
-        if !collection.is_empty() || !labels.is_empty() || !sellers.is_empty() {
+        if !collection.is_empty()
+            || !labels.is_empty()
+            || !sellers.is_empty()
+            || !friends.is_empty()
+        {
             bottom.push(SideRow::Discogs);
         }
         bottom.extend(collection.into_iter().map(|c| SideRow::Crate(c, None)));
@@ -2270,6 +2302,16 @@ impl DiggrApp {
                 for (id, dug, busy) in &sellers {
                     if let Some(c) = self.crates.info(*id) {
                         bottom.push(SideRow::Crate(c.clone(), Some((*dug, *busy))));
+                    }
+                }
+            }
+        }
+        if !friends.is_empty() {
+            bottom.push(SideRow::Friends(friends.len(), friends_folded));
+            if !friends_folded {
+                for (id, ..) in &friends {
+                    if let Some(c) = self.crates.info(*id) {
+                        bottom.push(SideRow::Crate(c.clone(), None));
                     }
                 }
             }
@@ -2349,6 +2391,22 @@ impl DiggrApp {
                     #[cfg(target_arch = "wasm32")]
                     let _ = resp;
                 }
+                SideRow::Friends(n, folded) => {
+                    let mark = if folded { "⏵" } else { "⏷" };
+                    let dr = heading(r, &format!("{mark} FRIENDS ({n})"));
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if ui
+                        .interact(dr, Id::new("pl_side_friends"), Sense::click())
+                        .on_hover_text(self.friends_tip())
+                        .clicked()
+                    {
+                        actions.push(Action::Dig(DigAction::Friend(
+                            crate::app::friends::FriendAction::ToggleFold,
+                        )));
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    let _ = dr;
+                }
                 SideRow::Crate(c, seller) => placed.push((c, r, seller)),
             }
         }
@@ -2359,8 +2417,11 @@ impl DiggrApp {
         for (c, row, seller) in &placed {
             let rr = sk.rect(x, y + *row as f32 * row_h, w - 1.0, row_h);
             let readable = !self.crates.is_unreadable(c.id);
-            // A seller crate never dug is dimmed and shows no count.
-            let undug = seller.is_some_and(|(dug, _)| !dug);
+            let friend = friend_of.get(&c.id).copied();
+            // A seller crate never dug, or a friend's private collection, is dimmed and shows
+            // no count.
+            let undug = seller.is_some_and(|(dug, _)| !dug)
+                || friend.is_some_and(|(_, private, _)| private);
             let over = dragging && readable && c.id != shown && ui.rect_contains_pointer(rr);
             // A Discogs crate isn't lit as a target: a drop there only says how to fill it.
             if over {
@@ -2461,6 +2522,12 @@ impl DiggrApp {
                     tip += "\nYour Discogs wantlist";
                 } else if c.is_label() {
                     tip += "\nA label you follow: it fills from the label's page";
+                } else if friend.is_some_and(|(_, private, _)| private) {
+                    tip += "\nPrivate collection";
+                } else if friend.is_some_and(|(dug, ..)| !dug) {
+                    tip += "\nA Discogs friend: double-click to dig their collection";
+                } else if friend.is_some() {
+                    tip += "\nA Discogs friend's collection: right-click to refresh it";
                 } else if undug {
                     tip += "\nTop Sellers: double-click to dig it";
                 } else if seller.is_some() {
@@ -2486,6 +2553,12 @@ impl DiggrApp {
             if resp.double_clicked() && seller.is_some() && readable {
                 actions.push(Action::Dig(DigAction::Seller(
                     crate::app::sellers::SellerAction::Dig(c.id),
+                )));
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            if resp.double_clicked() && friend.is_some() && readable {
+                actions.push(Action::Dig(DigAction::Friend(
+                    crate::app::friends::FriendAction::Dig(c.id),
                 )));
             }
             if resp.clicked() || menu_click {
@@ -2555,6 +2628,20 @@ impl DiggrApp {
                                 )));
                                 ui.close();
                             }
+                        }
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if let Some((true, false, busy)) = friend {
+                        let label = if busy { "Refreshing…" } else { "Refresh friend" };
+                        if ui
+                            .add_enabled(!busy, egui::Button::new(label))
+                            .on_hover_text("Read this friend's collection again")
+                            .clicked()
+                        {
+                            actions.push(Action::Dig(DigAction::Friend(
+                                crate::app::friends::FriendAction::Refresh(c.id),
+                            )));
+                            ui.close();
                         }
                     }
                     #[cfg(not(target_arch = "wasm32"))]
@@ -4047,6 +4134,11 @@ impl DiggrApp {
             }
             // An empty crate says how to fill it (not the Discogs crates: a paste can't).
             if shown.is_empty() && !self.crates.is_locked(self.crates.shown_id()) {
+                #[cfg(not(target_arch = "wasm32"))]
+                let lines = self
+                    .friend_hint(self.crates.shown_id())
+                    .unwrap_or_else(|| empty_crate_hint(PASTE_MODIFIER).to_vec());
+                #[cfg(target_arch = "wasm32")]
                 let lines = empty_crate_hint(PASTE_MODIFIER);
                 let line_h = sk.def.font.glyph_h as f32 + 4.0;
                 let body = list_h - (rows_top - top);
@@ -4774,6 +4866,27 @@ impl DiggrApp {
         }
         #[cfg(target_arch = "wasm32")]
         let _ = discogs;
+        // Refresh friend, for a dug friend's crate on screen.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(r) = self
+            .friend_rows()
+            .0
+            .into_iter()
+            .find(|r| r.crate_id == shown && r.dug && !r.private)
+        {
+            ui.separator();
+            let label = if r.busy {
+                "Refreshing…"
+            } else {
+                "Refresh friend"
+            };
+            if ui.add_enabled(!r.busy, egui::Button::new(label)).clicked() {
+                actions.push(Action::Dig(DigAction::Friend(
+                    crate::app::friends::FriendAction::Refresh(shown),
+                )));
+                ui.close();
+            }
+        }
         ui.separator();
         if ui.button("New crate…").clicked() {
             actions.push(Action::NewCrate);
@@ -5314,6 +5427,8 @@ enum SideRow {
     Labels(usize, bool),
     /// TOP SELLERS: how many, and whether folded.
     Sellers(usize, bool),
+    /// FRIENDS: how many, and whether folded.
+    Friends(usize, bool),
     /// A crate; for a seller crate, whether it was dug and is being refreshed.
     Crate(crate::crates::CrateInfo, Option<(bool, bool)>),
 }
@@ -7337,6 +7452,8 @@ mod headless_tests {
     // Digging, with a fake Discogs, fake previews and a fake browser.
     mod dig_tests;
     mod record_tests;
+    // Friends' collections, with a fake Discogs.
+    mod friend_tests;
     // Top Sellers and the cart, with a fake Discogs.
     mod seller_tests;
 

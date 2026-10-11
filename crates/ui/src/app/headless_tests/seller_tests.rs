@@ -366,6 +366,17 @@ fn a_seller_menu_offers_refresh_narrow_and_remove() {
 fn a_click_shows_a_seller_crate_without_asking_discogs() {
     let fakes = Fakes::new();
     let (mut rig, _, logon) = two_sellers("sellers-click", &fakes);
+    // What launch reads in the background (cart, lists, details) settles first.
+    let mut quiet = 0;
+    while quiet < 30 {
+        let n = fakes.transport.count();
+        rig.pump();
+        quiet = if fakes.transport.count() == n {
+            quiet + 1
+        } else {
+            0
+        };
+    }
     let before = fakes.transport.count();
     let pos = at(&mut rig, "Seller: logon");
     rig.click(pos);

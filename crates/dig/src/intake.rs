@@ -24,6 +24,7 @@ use crate::discogs::model::{ForSale, Format, Listed, Record, RecordKey, Role};
 use crate::discogs::seller::{self, Copy, Criteria, Ranked};
 use crate::discogs::transport::Method;
 use crate::discogs::url::{Page, PageKind};
+use crate::friends;
 use crate::jobs::{Filters, Job, JobId, Jobs};
 
 /// While Discogs doesn't answer, the same request is tried again this often.
@@ -79,9 +80,18 @@ pub enum Command {
     /// Bring the user's collection up to date from this cached one (or from nothing). Runs
     /// only when no send is waiting.
     SyncCollection(Option<Box<Collection>>),
-    /// Stop the collection sync waiting or running (Stop in the refresh window); nothing is
-    /// sent about it, and the previous collection stays.
+    /// Stop the collection sync waiting or running (Stop in the refresh window), and a
+    /// friend's collection read; nothing is sent about it, and the previous collection stays.
     CancelCollectionSync,
+    /// Read the user's friends list (at a moment with no send), checking whether each
+    /// friend's collection is private. Answered with [`Event::Friends`].
+    ReadFriends,
+    /// Read `user`'s whole collection, a page per step, for crate `target` (Refresh friend).
+    /// Answered with [`Event::FriendProgress`] and then [`Event::FriendCollection`].
+    ReadFriendCollection {
+        target: u64,
+        user: String,
+    },
     /// End every send into crate `target` now (each answered with `Finished`); what arrived
     /// stays.
     StopJobs(u64),
@@ -239,6 +249,17 @@ pub enum Event {
         read: u32,
         pages: u32,
     },
+    /// The friends list, each with whether their collection is private; or why it couldn't
+    /// be read (the last list stays).
+    Friends(Result<Vec<(String, bool)>, ApiError>),
+    /// A friend's collection read for crate `target` got through `read` of `pages` pages.
+    FriendProgress {
+        target: u64,
+        read: u32,
+        pages: u32,
+    },
+    /// A friend's collection, read whole for crate `target`, or why not.
+    FriendCollection(u64, Result<Box<Collection>, ApiError>),
     /// A marketplace item's release (`None`: Discogs doesn't know the item).
     ShopItem(u64, Option<u64>),
     /// Cached details for a crate's records (see [`Command::Backfill`]); uncached ones are
@@ -346,6 +367,10 @@ pub struct Intake {
     collection_sync: Option<Option<Box<Collection>>>,
     /// The sync running, one page per step.
     syncer: Option<collection::Syncer>,
+    /// The friends list is to be read.
+    friends_read: bool,
+    /// A friend's collection being read: their crate and the read, a page per step.
+    friend_read: Option<(u64, collection::Syncer)>,
     shop_items: Vec<u64>,
     first_sellers: bool,
     /// The cart is to be read at a moment with no send (`false`), or ahead of sends (`true`).
@@ -372,6 +397,8 @@ impl Intake {
             now: crate::now_secs,
             collection_sync: None,
             syncer: None,
+            friends_read: false,
+            friend_read: None,
             shop_items: Vec::new(),
             first_sellers: false,
             cart_read: None,
@@ -512,6 +539,12 @@ impl Intake {
             Command::CancelCollectionSync => {
                 self.collection_sync = None;
                 self.syncer = None;
+                self.friend_read = None;
+            }
+            Command::ReadFriends => self.friends_read = true,
+            Command::ReadFriendCollection { target, user } => {
+                let now = (self.now)();
+                self.friend_read = Some((target, collection::Syncer::new(&user, None, now)));
             }
             Command::StopJobs(target) => {
                 let (stopped, kept) = std::mem::take(&mut self.jobs.jobs)
@@ -707,6 +740,29 @@ impl Intake {
             self.events.push(Event::FirstSellers(result));
             return true;
         }
+        if std::mem::take(&mut self.friends_read) {
+            self.read_friends();
+            return true;
+        }
+        if let Some((target, syncer)) = &mut self.friend_read {
+            let target = *target;
+            let event = match syncer.step(&mut self.client) {
+                Ok(None) => {
+                    let (read, pages) = syncer.progress();
+                    Event::FriendProgress {
+                        target,
+                        read,
+                        pages,
+                    }
+                }
+                done => {
+                    self.friend_read = None;
+                    Event::FriendCollection(target, done.map(|c| Box::new(c.expect("read"))))
+                }
+            };
+            self.events.push(event);
+            return true;
+        }
         if let Some(id) = self.shop_items.first().copied() {
             match expand::shop_item_release(&mut self.client, id, now) {
                 Err(ApiError::Offline) => {
@@ -769,6 +825,24 @@ impl Intake {
             self.events.push(Event::OwnedWants(ids));
         }
         true
+    }
+
+    /// The friends list, and whether each friend's collection is private (one small request
+    /// each, once a week).
+    fn read_friends(&mut self) {
+        self.ensure_identity();
+        let Some(user) = self.client.identity().map(|i| i.username.clone()) else {
+            self.events.push(Event::Friends(Err(ApiError::TokenNeeded)));
+            return;
+        };
+        let result = friends::read(&mut self.client, &user).and_then(|names| {
+            names
+                .into_iter()
+                .map(|n| Ok((n.clone(), friends::is_private(&mut self.client, &n)?)))
+                .collect()
+        });
+        self.track(&result);
+        self.events.push(Event::Friends(result));
     }
 
     /// One request's worth of work. False when there is nothing to do.

@@ -138,7 +138,7 @@ and Home/End jump), and Enter plays the entry under it.
     play (or pause) sign marks the one your track comes from while it plays (or is paused).
     Your Discogs collection crate is pinned at the bottom under **DISCOGS**, in amber with a
     record icon, even if you rename it, followed by the labels you follow (**LABELS**, see
-    [Labels](#labels)) and **TOP SELLERS**. **Playlist**'s menu offers Clear crate (it can't be
+    [Labels](#labels)), **TOP SELLERS** and **FRIENDS** (see [Friends](#friends)). **Playlist**'s menu offers Clear crate (it can't be
     renamed or deleted: Eject and opened files use it). Click one to
     show it, right-click it (Control-click on a Mac) for **Rename crate…** and **Delete crate…**, or
     click a crate and press Delete, or click **+ New crate**. Drag entries onto
@@ -582,6 +582,24 @@ The cart and purchases calls aren't part of Discogs' published API (they are wha
 itself uses, checked in October 2026). If Discogs changes them, the first list stays empty
 (add sellers by hand), and + CART opens the listing instead.
 
+### Friends
+
+With a token, **FRIENDS** under TOP SELLERS holds a crate per Discogs friend ("Friend:
+‹name›"), filled from their collection. The list comes from Discogs (your friends there),
+read the first time and then once a week; there's no adding or removing friends here. That
+endpoint isn't in Discogs' developer docs, so if a read fails the last list stays, and
+hovering **FRIENDS** says when it was read and why it couldn't be read again.
+
+- A click shows a friend's crate without asking Discogs. **Double-click** a crate you haven't
+  dug to dig their collection, one row per record, with **OWNED** on what you already have.
+- **Refresh friend** on its right-click (or the title-bar crate menu) reads their collection
+  again: what they added comes in, what they no longer have leaves ("javimaxilo: 3 new, 1
+  gone"). A window shows the progress, with **Stop**.
+- A friend whose collection is private is dimmed, with the tooltip "Private collection". Each
+  read of the list checks every friend's collection with one small request, so this shows
+  before you dig, and clears when they open it up.
+- Someone who's no longer your friend leaves FRIENDS; their crate stays, as an ordinary one.
+
 ### From the browser
 
 A Chrome extension (in `extensions/chrome/`) adds a button to Discogs and Bandcamp pages: Play
@@ -985,7 +1003,8 @@ yt-dlp path, the Wantlist crate, whether the Connect to Discogs dialog was turne
 to be sent, with their retries), `jobs.ron` (sends still in progress), `bandcamp.ron` (the
 Bandcamp albums each label crate has read, and the labels you kept separate), `sellers.ron` (Top
 Sellers: their order, each one's dig criteria, when it was last dug, and whether the first list
-was made) and
+was made), `friends.ron` (your Discogs friends, when the list was read, which collections are
+private and which crates were dug) and
 `bridge.ron` (the browser bridge's port and the SHA-256 of each paired browser's key, readable
 only by you). In the
 cache, `discogs/` keeps API responses: record details for good, listings for a day, and
@@ -1010,7 +1029,7 @@ Other environment variables, mostly for unattended runs and measurements:
 ## Tests
 
 ```sh
-cargo test --workspace            # 842 tests, under a minute after the first build; no audio hardware or display needed
+cargo test --workspace            # 852 tests, under a minute after the first build; no audio hardware or display needed
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 cargo check -p audio -p platform --target wasm32-unknown-unknown   # core stays web-portable

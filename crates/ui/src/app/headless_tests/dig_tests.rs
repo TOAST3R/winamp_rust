@@ -132,6 +132,8 @@ fn play_release(rig: &mut Rig) -> CrateId {
         |r| r.app.position.state == PlayState::Playing && r.app.crates.playing_id() == c,
         "the first preview plays",
     );
+    // The whole record is in before anything acts on it.
+    rig.until(|r| clips(r, c).len() == CLIPS.len(), "the record's tracks");
     c
 }
 
@@ -298,8 +300,17 @@ fn y_adds_the_record_to_the_wantlist_and_y_again_removes_it() {
     assert_eq!(flash(&rig).as_deref(), Some("WANTED"));
     let wl = wantlist(&rig).expect("the wantlist crate");
     rig.app.crates.load(wl);
-    // The whole record, at once.
-    assert_eq!(clips_of(&rig, wl, 1001), CLIPS);
+    // The whole record: copied at once, and a track whose clip another wanted record holds
+    // comes with the release's own fill.
+    rig.until(
+        |r| clips_of(r, wl, 1001).len() == CLIPS.len(),
+        "the whole record",
+    );
+    let mut got = clips_of(&rig, wl, 1001);
+    got.sort();
+    let mut want = CLIPS.map(str::to_owned).to_vec();
+    want.sort();
+    assert_eq!(got, want);
     assert!(memory(&rig).is_wanted(1001));
     assert!(
         message(&rig).contains("to your wantlist"),
@@ -1753,7 +1764,10 @@ fn the_wantlist_crate_takes_no_hand_removals() {
     play_release(&mut rig);
     key(&mut rig, Key::Y);
     let wl = wantlist(&rig).unwrap();
-    rig.until(|r| r.app.crates.is_wantlist(wl), "the account is known");
+    rig.until(
+        |r| r.app.crates.is_wantlist(wl) && clips_of(r, wl, 1001).len() == 3,
+        "the account is known, and the record is in",
+    );
     rig.app.show_crate(wl);
     let ctx = rig.ctx.clone();
     // Delete (or Remove selected) changes nothing, and says how records leave.
